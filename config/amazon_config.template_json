@@ -1,8 +1,28 @@
 {
-  "asin_groups": 2,
-  "asin_list_1": ["B07JH53M4T"],
-  "reserve_1": 15,
-  "asin_list_2": ["B08HR7SV3M"],
-  "reserve_2": 20,
   "amazon_website": "smile.amazon.com"
+  "products": [
+    {
+      "name": "USB Thumb Drive 2-pack",
+      "asin_list": [
+        "B07JH53M4T",
+        "B07K82N8NS"
+      ],
+      "reserve": 3.00
+    },
+    {
+      "name": "nVidia RTX 3080",
+      "asin_list": [
+        "B08HR7SV3M",
+        "B08HH5WF97"
+      ],
+      "reserve": 650.00
+    },
+    {
+      "name": "Segway"
+      "asin_list": [
+        "B07XPMQ2SR"
+      ],
+      "reserve": 499
+    }
+  ]
 }
