@@ -269,12 +269,10 @@ class Amazon:
             except Exception:
                 log.error("We didnt break out of the run() loop, in the exception now.")
                 pass
-        log.info("Waiting for home page.")
         self.handle_startup()
         if not self.is_logged_in():
             self.login()
         self.save_screenshot("Bot Logged in and Starting up")
-        keep_going = True
 
         while len(self.products) > 0:
             log.info("Starting product check...")
