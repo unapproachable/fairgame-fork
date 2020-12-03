@@ -1,33 +1,25 @@
 import getpass
 import json
-import time
-import os
 import math
-import re
-from datetime import datetime
-from price_parser import parse_price
+import os
 import random
+import time
+from datetime import datetime
 
 from amazoncaptcha import AmazonCaptcha
 from chromedriver_py import binary_path  # this will get you the path variable
 from furl import furl
+from price_parser import parse_price
 from selenium import webdriver
 from selenium.common import exceptions
-
-# from selenium.common.exceptions import (
-#     NoSuchElementException,
-#     SessionNotCreatedException,
-#     TimeoutException,
-# )
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
-from utils import selenium_utils
-from utils.json_utils import InvalidAutoBuyConfigException
-from utils.logger import log
-from utils.selenium_utils import options, enable_headless, wait_for_element
-from utils.encryption import create_encrypted_config, load_encrypted_config
+from utils import json_utils
 from utils.debugger import debug
+from utils.encryption import create_encrypted_config, load_encrypted_config
+from utils.logger import log
+from utils.selenium_utils import options, enable_headless
 
 AMAZON_URLS = {
     "BASE_URL": "https://{domain}/",
@@ -179,6 +171,9 @@ class Amazon:
         self.detailed = detailed
         self.used = used
         self.single_shot = single_shot
+        self.checkout_retry = 0
+        self.order_retry = 0
+        self.in_checkout_process = True
 
         if not os.path.exists("screenshots"):
             try:
@@ -208,11 +203,20 @@ class Amazon:
                     self.amazon_website = config.get(
                         "amazon_website", "smile.amazon.com"
                     )
-                    for x in range(self.asin_groups):
-                        self.asin_list.append(config[f"asin_list_{x + 1}"])
-                        self.reserve.append(float(config[f"reserve_{x + 1}"]))
-                    # assert isinstance(self.asin_list, list)
-                except Exception:
+                    self.products = []
+                    products_json = config["products"]
+                    for product_json in products_json:
+                        log.info(
+                            f"Found {product_json['name']} with {len(product_json['asin_list'])} ASINs and a reserve of {product_json['reserve']}"
+                        )
+                        if not is_valid_product(product_json):
+                            continue
+                        # Use a namedtuple to create an object instance from the JSON map
+                        product = json_utils.product_loader(product_json)
+                        self.products.append(product)
+
+                    log.info(f"Found {len(self.products)} Products to hunt for...")
+                except Exception as e:
                     log.error(
                         "amazon_config.json file not formatted properly: https://github.com/Hari-Nagarajan/nvidia-bot/wiki/Usage#json-configuration"
                     )
@@ -253,45 +257,45 @@ class Amazon:
         }
 
     def run(self, delay=3, test=False):
+        log.info("Waiting for home page.")
         while True:
             try:
                 self.driver.get(AMAZON_URLS["BASE_URL"])
                 break
             except Exception:
                 pass
-        log.info("Waiting for home page.")
         self.handle_startup()
         if not self.is_logged_in():
             self.login()
         self.save_screenshot("Bot Logged in and Starting up")
-        keep_going = True
 
-        while keep_going:
-            asin = self.run_asins(delay)
+        while len(self.products) > 0:
+            log.info("Starting product check...")
+            in_stock_asin = self.run_products(delay)
             # found something in stock and under reserve
             # initialize loop limiter variables
-            self.try_to_checkout = True
+            self.in_checkout_process = True
             self.checkout_retry = 0
             self.order_retry = 0
             loop_iterations = 0
-            while self.try_to_checkout:
+            while self.in_checkout_process:
                 self.navigate_pages(test)
-                # if successful after running navigate pages, remove the asin_list from the list
-                if not self.try_to_checkout:
-                    self.remove_asin_list(asin)
+                # if successful after running navigate pages, remove the product from the list
+                if not self.in_checkout_process:
+                    self.products.remove(self.find_product_by_asin(in_stock_asin))
                 # checkout loop limiters
                 elif self.checkout_retry > DEFAULT_MAX_PTC_TRIES:
-                    self.try_to_checkout = False
+                    self.in_checkout_process = False
                 elif self.order_retry > DEFAULT_MAX_PYO_TRIES:
                     if test:
-                        self.remove_asin_list(asin)
-                    self.try_to_checkout = False
+                        self.products.remove(self.find_product_by_asin(in_stock_asin))
+                    self.in_checkout_process = False
                 loop_iterations += 1
                 if loop_iterations > DEFAULT_MAX_CHECKOUT_LOOPS:
-                    self.try_to_checkout = False
-            # if no items left it list, let loop end
-            if not self.asin_list:
-                keep_going = False
+                    self.in_checkout_process = False
+            # # if no items left it list, let loop end
+            # if not self.asin_list:
+            #     keep_going = False
 
     @debug
     def handle_startup(self):
@@ -360,28 +364,41 @@ class Amazon:
                 time.sleep(DEFAULT_MAX_WEIRD_PAGE_DELAY)
         log.info(f"Logged in as {self.username}")
 
-    @debug
-    def run_asins(self, delay):
-        found_asin = False
+    def run_products(self, delay):
+        found_asin = None
+        # Main loop runs until we get an ASIN that matches the buy criteria
         while not found_asin:
-            for i in range(len(self.asin_list)):
-                for asin in self.asin_list[i]:
-                    if self.check_stock(asin, self.reserve[i]):
-                        return asin
-                    time.sleep(delay)
+            for product in self.products:
+                # process the ASINS associated with this product
+                found_asin = self.run_asins(
+                    product.asin_list,
+                    delay,
+                    product.reserve,
+                    self.checkshipping or product.check_shipping,
+                    self.used or product.used,
+                )
+        return found_asin
 
     @debug
-    def check_stock(self, asin, reserve, retry=0):
+    def run_asins(self, asin_list, delay, reserve, check_shipping, used):
+        for asin in asin_list:
+            if self.check_stock(asin, reserve):
+                return asin
+            time.sleep(delay)
+        return None
+
+    @debug
+    def check_stock(self, asin, reserve, retry=0, check_shipping=False, used=False):
         if retry > DEFAULT_MAX_ATC_TRIES:
             log.info("max add to cart retries hit, returning to asin check")
             return False
-        if self.checkshipping:
-            if self.used:
+        if check_shipping:
+            if used:
                 f = furl(AMAZON_URLS["OFFER_URL"] + asin)
             else:
                 f = furl(AMAZON_URLS["OFFER_URL"] + asin + "/ref=olp_f_new&f_new=true")
         else:
-            if self.used:
+            if used:
                 f = furl(AMAZON_URLS["OFFER_URL"] + asin + "/f_freeShipping=on")
             else:
                 f = furl(
@@ -420,7 +437,7 @@ class Amazon:
             price_float = price.amount
             if price_float is None:
                 return False
-            if ship_float is None or not self.checkshipping:
+            if ship_float is None or not check_shipping:
                 ship_float = 0
 
             if (ship_float + price_float) <= reserve or math.isclose(
@@ -438,7 +455,11 @@ class Amazon:
                     self.save_screenshot("failed-atc")
                     self.save_page_source("failed-atc")
                     in_stock = self.check_stock(
-                        asin=asin, reserve=reserve, retry=retry + 1
+                        asin=asin,
+                        reserve=reserve,
+                        retry=retry + 1,
+                        check_shipping=check_shipping,
+                        used=used,
                     )
         return in_stock
 
@@ -586,7 +607,7 @@ class Amazon:
                 else:
                     log.info(f"Found button {button.text}, but this is a test")
                     "will not try to complete order"
-                    self.try_to_checkout = False
+                    self.in_checkout_process = False
             self.button_xpaths.append(self.button_xpaths.pop(0))
         if not test and self.driver.title == previous_title:
             # Could not click button, refresh page and try again
@@ -607,14 +628,14 @@ class Amazon:
         if self.single_shot:
             exit(0)
         else:
-            self.try_to_checkout = False
+            self.in_checkout_process = False
 
     @debug
     def handle_doggos(self):
         self.notification_handler.send_notification(
             "You got dogs, bot may not work correctly. Ending Checkout"
         )
-        self.try_to_checkout = False
+        self.in_checkout_process = False
 
     @debug
     def handle_captcha(self):
@@ -677,6 +698,13 @@ class Amazon:
         else:
             return DEFAULT_PAGE_WAIT_DELAY
 
+    def find_product_by_asin(self, in_stock_asin):
+        for product in self.products:
+            for asin in product.asin_list:
+                if asin == in_stock_asin:
+                    return product
+        return None
+
 
 def get_timestamp_filename(name, extension):
     """Utility method to create a filename with a timestamp appended to the root and before
@@ -687,3 +715,16 @@ def get_timestamp_filename(name, extension):
         return name + "_" + date + extension
     else:
         return name + "_" + date + "." + extension
+
+
+def is_valid_product(product):
+    if not product["name"]:
+        log.error(f"No name configured for product, skipping...")
+        return False
+    if not product["asin_list"] or len(product["asin_list"]) == 0:
+        log.error(f"No ASINs configured for {product['name']}.  Skipping...")
+        return False
+    if not product["reserve"]:
+        log.error(f"No reserve set for {product['name']}.  Skipping...")
+        return False
+    return True
