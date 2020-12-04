@@ -18,6 +18,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from utils import json_utils
 from utils.debugger import debug
 from utils.encryption import create_encrypted_config, load_encrypted_config
+from utils.discord_presence import searching_update
+from utils.debugger import debug
 from utils.logger import log
 from utils.selenium_utils import options, enable_headless
 
@@ -235,7 +237,7 @@ class Amazon:
         # if os.path.isdir(profile_amz):
         #     os.remove(profile_amz)
         options.add_argument(f"user-data-dir=.profile-amz")
-        options.page_load_strategy = "eager"
+        # options.page_load_strategy = "eager"
 
         try:
             self.driver = webdriver.Chrome(executable_path=binary_path, options=options)
@@ -263,6 +265,7 @@ class Amazon:
                 self.driver.get(AMAZON_URLS["BASE_URL"])
                 break
             except Exception:
+                log.error("We didnt break out of the run() loop, in the exception now.")
                 pass
         self.handle_startup()
         if not self.is_logged_in():
@@ -409,9 +412,15 @@ class Amazon:
         try:
             while True:
                 try:
+                    try:
+                        searching_update()
+                    except Exception:
+                        pass
                     self.driver.get(f.url)
                     break
                 except Exception:
+                    log.error("Failed to get the URL, were in the exception now.")
+                    time.sleep(3)
                     pass
             elements = self.driver.find_elements_by_xpath(
                 '//*[@name="submit.addToCart"]'
@@ -445,6 +454,10 @@ class Amazon:
             ):
                 log.info("Item in stock and under reserve!")
                 log.info("clicking add to cart")
+                try:
+                    buy_update()
+                except:
+                    pass
                 elements[i].click()
                 time.sleep(self.page_wait_delay())
                 if self.driver.title in SHOPING_CART_TITLES:
