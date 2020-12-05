@@ -1,16 +1,13 @@
-from pypresence import Presence
 import time
-import random
+
+from pypresence import Presence
+
+start_time = int(time.time())
+version = "0.4.2"
 
 client_id = "783592971903696907"
 RPC = Presence(client_id=client_id)
-try:
-    RPC.connect()
-except:
-    pass
-
-start_time = time.time()
-version = "dev 0.1"
+RPC.connect()
 
 
 def start_presence(status):

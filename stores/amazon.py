@@ -1,4 +1,3 @@
-import getpass
 import json
 import math
 import os
@@ -6,6 +5,7 @@ import random
 import time
 from datetime import datetime
 
+import stdiomask
 from amazoncaptcha import AmazonCaptcha
 from chromedriver_py import binary_path  # this will get you the path variable
 from furl import furl
@@ -17,13 +17,11 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from utils import json_utils
 from utils.debugger import debug
+from utils.discord_presence import buy_update
+from utils.discord_presence import searching_update
 from utils.encryption import create_encrypted_config, load_encrypted_config
-from utils.discord_presence import searching_update, buy_update
-from utils.debugger import debug
 from utils.logger import log
 from utils.selenium_utils import options, enable_headless
-from utils.discord_presence import searching_update
-from utils.debugger import debug
 
 AMAZON_URLS = {
     "BASE_URL": "https://{domain}/",
@@ -165,6 +163,7 @@ class Amazon:
         detailed=False,
         used=False,
         single_shot=False,
+        no_screenshots=False,
     ):
         self.notification_handler = notification_handler
         self.asin_list = []
@@ -178,12 +177,17 @@ class Amazon:
         self.checkout_retry = 0
         self.order_retry = 0
         self.in_checkout_process = True
+        self.no_screenshots = no_screenshots
+        self.start_time = time.time()
+        self.start_time_atc = 0
 
-        if not os.path.exists("screenshots"):
-            try:
-                os.makedirs("screenshots")
-            except:
-                raise
+        if not self.no_screenshots:
+            if not os.path.exists("screenshots"):
+                try:
+                    os.makedirs("screenshots")
+                except:
+                    raise
+
         if not os.path.exists("html_saves"):
             try:
                 os.makedirs("html_saves")
@@ -198,6 +202,8 @@ class Amazon:
             log.info("No credential file found, let's make one")
             credential = self.await_credential_input()
             create_encrypted_config(credential, CREDENTIAL_FILE)
+            self.username = credential["username"]
+            self.password = credential["password"]
 
         if os.path.exists(AUTOBUY_CONFIG_PATH):
             with open(AUTOBUY_CONFIG_PATH) as json_file:
@@ -222,12 +228,12 @@ class Amazon:
                     log.info(f"Found {len(self.products)} Products to hunt for...")
                 except Exception as e:
                     log.error(
-                        "amazon_config.json file not formatted properly: https://github.com/Hari-Nagarajan/nvidia-bot/wiki/Usage#json-configuration"
+                        "amazon_config.json file not formatted properly: https://github.com/Hari-Nagarajan/fairgame/wiki/Usage#json-configuration"
                     )
                     exit(0)
         else:
             log.error(
-                "No config file found, see here on how to fix this: https://github.com/Hari-Nagarajan/nvidia-bot/wiki/Usage#json-configuration"
+                "No config file found, see here on how to fix this: https://github.com/Hari-Nagarajan/fairgame/wiki/Usage#json-configuration"
             )
             exit(0)
 
@@ -254,7 +260,7 @@ class Amazon:
     @staticmethod
     def await_credential_input():
         username = input("Amazon login ID: ")
-        password = getpass.getpass(prompt="Amazon Password: ")
+        password = stdiomask.getpass(prompt="Amazon Password: ")
         return {
             "username": username,
             "password": password,
@@ -273,6 +279,10 @@ class Amazon:
         if not self.is_logged_in():
             self.login()
         self.save_screenshot("Bot Logged in and Starting up")
+        if self.no_screenshots:
+            self.notification_handler.send_notification("Bot Logged in and Starting up")
+        else:
+            self.save_screenshot("Bot Logged in and Starting up")
 
         while len(self.products) > 0:
             log.info("Starting product check...")
@@ -285,8 +295,8 @@ class Amazon:
             loop_iterations = 0
             while self.in_checkout_process:
                 self.navigate_pages(test)
-                # if successful after running navigate pages, remove the product from the list
-                if not self.in_checkout_process:
+                # if successful after running navigate pages, remove the asin_list from the list
+                if not self.in_checkout_process and not self.single_shot:
                     self.products.remove(self.find_product_by_asin(in_stock_asin))
                 # checkout loop limiters
                 elif self.checkout_retry > DEFAULT_MAX_PTC_TRIES:
@@ -298,9 +308,11 @@ class Amazon:
                 loop_iterations += 1
                 if loop_iterations > DEFAULT_MAX_CHECKOUT_LOOPS:
                     self.in_checkout_process = False
-            # # if no items left it list, let loop end
+            # if no items left it list, let loop end
             # if not self.asin_list:
-            #     keep_going = False
+            #    keep_going = False
+        runtime = time.time() - self.start_time
+        log.info(f"FairGame bot ran for {runtime} seconds.")
 
     @debug
     def handle_startup(self):
@@ -387,13 +399,13 @@ class Amazon:
     @debug
     def run_asins(self, asin_list, delay, reserve, check_shipping, used):
         for asin in asin_list:
-            if self.check_stock(asin, reserve):
+            if self.check_stock(asin, reserve, check_shipping, used):
                 return asin
             time.sleep(delay)
         return None
 
     @debug
-    def check_stock(self, asin, reserve, retry=0, check_shipping=False, used=False):
+    def check_stock(self, asin, reserve, check_shipping=False, used=False, retry=0):
         if retry > DEFAULT_MAX_ATC_TRIES:
             log.info("max add to cart retries hit, returning to asin check")
             return False
@@ -416,7 +428,7 @@ class Amazon:
                 try:
                     try:
                         searching_update()
-                    except Exception:
+                    except:
                         pass
                     self.driver.get(f.url)
                     break
@@ -467,7 +479,10 @@ class Amazon:
                 else:
                     log.info("did not add to cart, trying again")
                     log.debug(f"failed title was {self.driver.title}")
-                    self.save_screenshot("failed-atc")
+                    if self.no_screenshots:
+                        self.notification_handler.send_notification("failed-atc")
+                    else:
+                        self.save_screenshot("failed-atc")
                     self.save_page_source("failed-atc")
                     in_stock = self.check_stock(
                         asin=asin,
@@ -515,7 +530,10 @@ class Amazon:
             log.error(
                 f"{title} is not a known title, please create issue indicating the title with a screenshot of page"
             )
-            self.save_screenshot("unknown-title")
+            if self.no_screenshots:
+                self.notification_handler.send_notification("unknown-title")
+            else:
+                self.save_screenshot("unknown-title")
             self.save_page_source("unknown-title")
 
     @debug
@@ -543,7 +561,13 @@ class Amazon:
                         )
                     except exceptions.NoSuchElementException:
                         self.save_page_source("prime-signup-error")
-                        self.save_screenshot("prime-signup-error")
+                        if self.no_screenshots:
+                            self.notification_handler.send_notification(
+                                "prime-signup-error"
+                            )
+                        else:
+                            self.save_screenshot("prime-signup-error")
+
         if button:
             button.click()
         else:
@@ -570,6 +594,7 @@ class Amazon:
 
     @debug
     def handle_cart(self):
+        self.start_time_atc = time.time()
         log.info("clicking checkout.")
         try:
             self.driver.find_element_by_xpath('//*[@id="hlb-ptc-btn-native"]').click()
@@ -579,7 +604,10 @@ class Amazon:
             except exceptions.NoSuchElementException:
                 log.error("couldn't find buttons to proceed to checkout")
                 self.save_page_source("ptc-error")
-                self.save_screenshot("ptc-error")
+                if self.no_screenshots:
+                    self.notification_handler.send_notification("ptc-error")
+                else:
+                    self.save_screenshot("ptc-error")
                 log.info("Refreshing page to try again")
                 self.driver.refresh()
                 self.checkout_retry += 1
@@ -588,7 +616,6 @@ class Amazon:
     def handle_checkout(self, test):
         previous_title = self.driver.title
         button = None
-        i = 0
         for i in range(len(self.button_xpaths)):
             try:
                 if (
@@ -609,7 +636,7 @@ class Amazon:
                     j = 0
                     while (
                         self.driver.title == previous_title
-                        or j < MAX_CHECKOUT_BUTTON_WAIT
+                        and j < MAX_CHECKOUT_BUTTON_WAIT
                     ):
                         time.sleep(self.page_wait_delay())
                         j += 1
@@ -621,17 +648,20 @@ class Amazon:
                         )
                 else:
                     log.info(f"Found button {button.text}, but this is a test")
-                    "will not try to complete order"
+                    log.info("will not try to complete order")
                     self.in_checkout_process = False
+                    break
             self.button_xpaths.append(self.button_xpaths.pop(0))
         if not test and self.driver.title == previous_title:
             # Could not click button, refresh page and try again
             log.error("couldn't find buttons to proceed to checkout")
             self.save_page_source("ptc-error")
-            self.save_screenshot("ptc-error")
-            self.notification_handler.send_notification(
-                "error in checkout, please check window"
-            )
+            if self.no_screenshots:
+                self.notification_handler.send_notification(
+                    "error in checkout, please check window"
+                )
+            else:
+                self.save_screenshot("ptc-error")
             log.info("Refreshing page to try again")
             self.driver.refresh()
             self.order_retry += 1
@@ -639,11 +669,14 @@ class Amazon:
     @debug
     def handle_order_complete(self):
         log.info("Order Placed.")
-        self.save_screenshot("order-placed")
-        if self.single_shot:
-            exit(0)
+        if self.no_screenshots:
+            self.notification_handler.send_notification("Order placed")
         else:
-            self.in_checkout_process = False
+            self.save_screenshot("order-placed")
+        if self.single_shot:
+            self.products = []
+        self.in_checkout_process = False
+        log.info(f"checkout completed in {time.time() - self.start_time_atc} seconds")
 
     @debug
     def handle_doggos(self):
@@ -671,7 +704,12 @@ class Amazon:
                         )
                         self.driver.refresh()
                     else:
-                        self.save_screenshot("captcha")
+                        if self.no_screenshots:
+                            self.notification_handler.send_notification(
+                                "Solving captcha"
+                            )
+                        else:
+                            self.save_screenshot("captcha")
                         self.driver.find_element_by_xpath(
                             '//*[@id="captchacharacters"]'
                         ).send_keys(solution + Keys.RETURN)
