@@ -10,9 +10,6 @@ from stores.basestore import BaseStoreHandler
 from utils.logger import log
 
 REALTIME_INVENTORY_URL = "https://www.bhphotovideo.com/bnh/controller/home/"
-# https://www.bhphotovideo.com/bnh/controller/home/?Q=json&A=wishListDetail&li=9f513beb6cb99bf7cf9b215224f172af
-
-
 CONFIG_FILE_PATH = "config/bhphoto_config.json"
 
 HEADERS = {
@@ -153,7 +150,6 @@ class BHPhotoHandler(BaseStoreHandler):
         """B&H Photo website XHR request that we're borrowing for lightweight inventory queries.  Returns JSON"""
         log.debug(f"Calling B&H Photo web service...")
         try:
-            # parameters = {"Q": "json", "A": "wishList"}
             parameters = {"Q": "json", "A": "wishListDetail", "li": wishlist_id}
             response_json = self.session.get(
                 REALTIME_INVENTORY_URL,
