@@ -21,6 +21,7 @@ from stores.bestbuy import BestBuyHandler
 from stores.bhphoto import BHPhotoHandler
 from utils import selenium_utils
 from utils.logger import log
+from utils import version
 from utils.version import check_version
 
 notification_handler = NotificationHandler()
