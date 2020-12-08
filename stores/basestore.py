@@ -16,4 +16,4 @@ class BaseStoreHandler:
 
     @staticmethod
     def get_elapsed_time(start_time):
-        return start_time - int(time.time())
+        return int(time.time()) - start_time
