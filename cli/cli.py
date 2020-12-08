@@ -7,7 +7,9 @@ import time
 
 from notifications.notifications import NotificationHandler, TIME_FORMAT
 from stores.amazon import Amazon
+from stores.asus import AsusStoreHandler
 from stores.bestbuy import BestBuyHandler
+from stores.bhphoto import BHPhotoHandler
 from utils import selenium_utils
 from utils.logger import log
 from utils.version import check_version
@@ -165,8 +167,30 @@ def test_notifications():
     time.sleep(5)
 
 
+@click.command()
+@click.option(
+    "--delay", type=float, default=15.0, help="Time to wait between checks for item[s]"
+)
+@notify_on_crash
+def asus(delay):
+    store = AsusStoreHandler(notification_handler=notification_handler)
+    store.run(delay=delay)
+
+
+@click.command()
+@click.option(
+    "--delay", type=float, default=15.0, help="Time to wait between checks for item[s]"
+)
+@notify_on_crash
+def bhphoto(delay):
+    store = BHPhotoHandler(notification_handler=notification_handler)
+    store.run(delay=delay)
+
+
 signal(SIGINT, handler)
 
 main.add_command(amazon)
 main.add_command(bestbuy)
+main.add_command(asus)
+main.add_command(bhphoto)
 main.add_command(test_notifications)
