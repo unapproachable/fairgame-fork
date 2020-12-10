@@ -56,8 +56,8 @@ class AsusStoreHandler(BaseStoreHandler):
         self.notification_handler.send_notification(message)
 
         while True:
-            status_list = self.get_sm_status_list() or []
-            for sm_id, sm_details in status_list.items():
+            status_collection = self.get_sm_status_dict()
+            for sm_id, sm_details in status_collection.items():
                 if self.stock_checks > 0 and self.stock_checks % 1000 == 0:
                     checks_per_second = self.stock_checks / self.get_elapsed_time(
                         self.start_time
@@ -93,7 +93,7 @@ class AsusStoreHandler(BaseStoreHandler):
 
     def verify(self):
         log.info("Verifying item list...")
-        sm_status_list = self.get_sm_status_list()
+        sm_status_list = self.get_sm_status_dict()
         for sm_id, sm_details in sm_status_list.items():
             if sm_details["not_found"]:
                 log.error(
@@ -110,13 +110,13 @@ class AsusStoreHandler(BaseStoreHandler):
                 )
         log.info(f"Verified {len(self.sm_list)} items on Asus Store")
 
-    def get_sm_status_list(self):
+    def get_sm_status_dict(self):
         # Get the list of SM responses or an empty response
-        rtd = self.get_real_time_data()
-        if rtd:
+        try:
+            rtd = self.get_real_time_data()
             return rtd["data"]
-        else:
-            return []
+        except:
+            return {}
 
     def get_real_time_data(self):
         """ASUS website XHR request that we're borrowing for lightweight inventory queries.  Returns JSON"""
