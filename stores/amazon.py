@@ -7,6 +7,9 @@ import time
 from datetime import datetime
 
 import psutil
+
+# see https://www.selenium.dev/selenium/docs/api/py/webdriver_support/selenium.webdriver.support.expected_conditions.html
+import selenium.webdriver.support.expected_conditions as ExpectedConditions
 import stdiomask
 from amazoncaptcha import AmazonCaptcha
 from chromedriver_py import binary_path  # this will get you the path variable
@@ -14,6 +17,7 @@ from furl import furl
 from price_parser import parse_price
 from selenium import webdriver
 from selenium.common import exceptions
+from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -178,6 +182,7 @@ class Amazon:
         disable_presence=False,
     ):
         self.notification_handler = notification_handler
+        self.asin_groups = 0
         self.asin_list = []
         self.reserve_min = []
         self.reserve_max = []
@@ -192,70 +197,35 @@ class Amazon:
         self.start_time_atc = 0
         self.webdriver_child_pids = []
         self.driver = None
+        self.wait = None
         self.refresh_delay = DEFAULT_REFRESH_DELAY
         self.testing = False
+        self.username = None
+        self.password = None
 
         presence.enabled = not disable_presence
         presence.start_presence()
 
-        # Create necessary sub-directories if they don't exist
-        if not os.path.exists("screenshots"):
-            try:
-                os.makedirs("screenshots")
-            except:
-                raise
+        # Prepare the directories we will need
+        create_directories()
 
-        if not os.path.exists("html_saves"):
-            try:
-                os.makedirs("html_saves")
-            except:
-                raise
+        # TODO: Migrate to app.py/cli.py level for all credentials
+        self.process_credentials()
 
-        if os.path.exists(CREDENTIAL_FILE):
-            credential = load_encrypted_config(CREDENTIAL_FILE)
-            self.username = credential["username"]
-            self.password = credential["password"]
-        else:
-            log.info("No credential file found, let's make one")
-            credential = self.await_credential_input()
-            create_encrypted_config(credential, CREDENTIAL_FILE)
-            self.username = credential["username"]
-            self.password = credential["password"]
+        # Load up the configuration
+        self.parse_config()
 
-        if os.path.exists(AUTOBUY_CONFIG_PATH):
-            with open(AUTOBUY_CONFIG_PATH) as json_file:
-                try:
-                    config = json.load(json_file)
-                    self.asin_groups = int(config["asin_groups"])
-                    self.amazon_website = config.get(
-                        "amazon_website", "smile.amazon.com"
-                    )
-                    for x in range(self.asin_groups):
-                        self.asin_list.append(config[f"asin_list_{x + 1}"])
-                        self.reserve_min.append(float(config[f"reserve_min_{x + 1}"]))
-                        self.reserve_max.append(float(config[f"reserve_max_{x + 1}"]))
-                    # assert isinstance(self.asin_list, list)
-                except Exception as e:
-                    log.error(f"{e} is missing")
-                    log.error(
-                        "amazon_config.json file not formatted properly: https://github.com/Hari-Nagarajan/fairgame/wiki/Usage#json-configuration"
-                    )
-                    exit(0)
-        else:
-            log.error(
-                "No config file found, see here on how to fix this: https://github.com/Hari-Nagarajan/fairgame/wiki/Usage#json-configuration"
-            )
-            exit(0)
+        # Configure and initialize the webdriver
+        self.prepare_webdriver(headless)
 
+    def prepare_webdriver(self, headless):
         if headless:
             enable_headless()
-
         # profile_amz = ".profile-amz"
         # # keep profile bloat in check
         # if os.path.isdir(profile_amz):
         #     os.remove(profile_amz)
         options.add_argument(f"user-data-dir=.profile-amz")
-
         try:
             self.driver = webdriver.Chrome(executable_path=binary_path, options=options)
             self.wait = WebDriverWait(self.driver, 10)
@@ -267,17 +237,48 @@ class Amazon:
             )
             exit(1)
 
-        for key in AMAZON_URLS.keys():
-            AMAZON_URLS[key] = AMAZON_URLS[key].format(domain=self.amazon_website)
+    def parse_config(self):
+        if os.path.exists(AUTOBUY_CONFIG_PATH):
+            with open(AUTOBUY_CONFIG_PATH) as json_file:
+                try:
+                    config = json.load(json_file)
+                    self.asin_groups = int(config["asin_groups"])
+                    for x in range(self.asin_groups):
+                        self.asin_list.append(config[f"asin_list_{x + 1}"])
+                        self.reserve_min.append(float(config[f"reserve_min_{x + 1}"]))
+                        self.reserve_max.append(float(config[f"reserve_max_{x + 1}"]))
 
-    @staticmethod
-    def await_credential_input():
-        username = input("Amazon login ID: ")
-        password = stdiomask.getpass(prompt="Amazon Password: ")
-        return {
-            "username": username,
-            "password": password,
-        }
+                    amazon_website = config.get("amazon_website", "smile.amazon.com")
+                    for key in AMAZON_URLS.keys():
+                        AMAZON_URLS[key] = AMAZON_URLS[key].format(
+                            domain=amazon_website
+                        )
+
+                    # assert isinstance(self.asin_list, list)
+                except Exception as e:
+                    log.error(f"{e} is missing")
+                    log.error(
+                        "amazon_config.json file not formatted properly: https://github.com/Hari-Nagarajan/fairgame/wiki/Usage#json-configuration"
+                    )
+                    exit(0)
+
+        else:
+            log.error(
+                "No config file found, see here on how to fix this: https://github.com/Hari-Nagarajan/fairgame/wiki/Usage#json-configuration"
+            )
+            exit(0)
+
+    def process_credentials(self):
+        if os.path.exists(CREDENTIAL_FILE):
+            credential = load_encrypted_config(CREDENTIAL_FILE)
+            self.username = credential["username"]
+            self.password = credential["password"]
+        else:
+            log.info("No credential file found, let's make one")
+            credential = await_credential_input()
+            create_encrypted_config(credential, CREDENTIAL_FILE)
+            self.username = credential["username"]
+            self.password = credential["password"]
 
     def run(self, delay=DEFAULT_REFRESH_DELAY, test=False):
         self.testing = test
@@ -454,6 +455,7 @@ class Amazon:
                     log.error("Failed to load the offer URL.  Retrying...")
                     time.sleep(3)
                     pass
+            # Try to find the Add To Cart button, price, and shipping costs
             elements = self.driver.find_elements_by_xpath(
                 '//*[@name="submit.addToCart"]'
             )
@@ -493,13 +495,15 @@ class Amazon:
 
                 presence.buy_update()
 
-                elements[i].click()
+                # Click the button! Behavior dictated by https://w3c.github.io/webdriver/#element-click
+                result = elements[i].click()
                 time.sleep(self.page_wait_delay())
                 if self.driver.title in SHOPING_CART_TITLES:
                     return True
                 else:
                     log.info("did not add to cart, trying again")
-                    log.debug(f"failed title was {self.driver.title}")
+                    log.info(f"failed title was {self.driver.title}")
+                    log.info(f"failed URL was {self.driver.current_url}")
                     self.send_notification(
                         "Failed Add to Cart", "failed-atc", self.take_screenshots
                     )
@@ -610,17 +614,41 @@ class Amazon:
 
     @debug
     def handle_cart(self):
+        log.info("Added to cart.  Moving on to checkout.")
         self.start_time_atc = time.time()
-        log.info("clicking checkout.")
         try:
+            # Force a screenshot to get focus so we can interact with the render window
+            # Possibly related to Issue 3641 and 3657 in chromedriver
+            # See https://chromedriver.storage.googleapis.com/87.0.4280.88/notes.txt
             self.save_screenshot("ptc-page")
         except:
             pass
         try:
-            self.driver.find_element_by_xpath('//*[@id="hlb-ptc-btn-native"]').click()
+            ptc_wait = WebDriverWait(
+                self.driver,
+                5,
+                poll_frequency=1,
+                ignored_exceptions=[
+                    exceptions.ElementNotVisibleException,
+                    exceptions.ElementClickInterceptedException,
+                ],
+            )
+            log.info("Looking for 'Proceed to checkout' button")
+            ptc_button = ptc_wait.until(
+                ExpectedConditions.element_to_be_clickable(
+                    (By.XPATH, '//*[@id="hlb-ptc-btn-native"]')
+                )
+            )
+            log.info("clicking 'Proceed to checkout'")
+            ptc_button.click()
+            # self.driver.find_element_by_xpath('//*[@id="hlb-ptc-btn-native"]').click()
+
         except exceptions.NoSuchElementException:
             try:
-                self.driver.find_element_by_xpath('//*[@id="hlb-ptc-btn"]').click()
+                log.info("Failed to find the first button. Looking for alternate.")
+                ptc_button = self.driver.find_element_by_xpath('//*[@id="hlb-ptc-btn"]')
+                log.info("clicking 'Proceed to checkout'")
+                ptc_button.click()
             except exceptions.NoSuchElementException:
                 log.error("couldn't find buttons to proceed to checkout")
                 self.save_page_source("ptc-error")
@@ -635,6 +663,7 @@ class Amazon:
 
     @debug
     def handle_checkout(self, test):
+        log.info("Made it to checkout. ")
         previous_title = self.driver.title
         button = None
         i = 0
@@ -812,7 +841,7 @@ class Amazon:
             )
 
     def show_config(self):
-        log.info(f"{'='*50}")
+        log.info(f"{'=' * 50}")
         log.info(f"Starting Amazon ASIN Hunt for {len(self.asin_list)} Products with:")
         log.info(f"--Delay of {self.refresh_delay} seconds")
         if self.used:
@@ -836,7 +865,7 @@ class Amazon:
             log.info(
                 f"--Looking for {len(asins)} ASINs between {self.reserve_min[idx]:.2f} and {self.reserve_max[idx]:.2f}"
             )
-        log.info(f"{'='*50}")
+        log.info(f"{'=' * 50}")
 
 
 def get_timestamp_filename(name, extension):
@@ -848,3 +877,26 @@ def get_timestamp_filename(name, extension):
         return name + "_" + date + extension
     else:
         return name + "_" + date + "." + extension
+
+
+def create_directories():
+    # Create necessary sub-directories if they don't exist
+    if not os.path.exists("screenshots"):
+        try:
+            os.makedirs("screenshots")
+        except:
+            raise
+    if not os.path.exists("html_saves"):
+        try:
+            os.makedirs("html_saves")
+        except:
+            raise
+
+
+def await_credential_input():
+    username = input("Amazon login ID: ")
+    password = stdiomask.getpass(prompt="Amazon Password: ")
+    return {
+        "username": username,
+        "password": password,
+    }
