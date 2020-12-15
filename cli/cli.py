@@ -1,9 +1,9 @@
+import time
 from datetime import datetime
 from functools import wraps
 from signal import signal, SIGINT
 
 import click
-import time
 
 from notifications.notifications import NotificationHandler, TIME_FORMAT
 from stores.amazon import Amazon
@@ -12,7 +12,6 @@ from stores.bestbuy import BestBuyHandler
 from stores.bhphoto import BHPhotoHandler
 from utils import selenium_utils
 from utils.logger import log
-from utils import version
 from utils.version import check_version
 
 notification_handler = NotificationHandler()
@@ -114,17 +113,17 @@ def main():
 )
 @notify_on_crash
 def amazon(
-    no_image,
-    headless,
-    test,
-    delay,
-    checkshipping,
-    detailed,
-    used,
-    random_delay,
-    single_shot,
-    no_screenshots,
-    disable_presence,
+        no_image,
+        headless,
+        test,
+        delay,
+        checkshipping,
+        detailed,
+        used,
+        random_delay,
+        single_shot,
+        no_screenshots,
+        disable_presence,
 ):
     if no_image:
         selenium_utils.no_amazon_image()
