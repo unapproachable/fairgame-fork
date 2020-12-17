@@ -6,6 +6,7 @@ import random
 import time
 from datetime import datetime
 
+from calmsize import size, alternative
 import psutil
 
 # see https://www.selenium.dev/selenium/docs/api/py/webdriver_support/selenium.webdriver.support.expected_conditions.html
@@ -15,6 +16,7 @@ from amazoncaptcha import AmazonCaptcha
 from chromedriver_py import binary_path  # this will get you the path variable
 from furl import furl
 from price_parser import parse_price
+from psutil import NoSuchProcess
 from selenium import webdriver
 from selenium.common import exceptions
 from selenium.webdriver.common.by import By
@@ -166,6 +168,34 @@ DEFAULT_PAGE_WAIT_DELAY = 0.5  # also serves as minimum wait for randomized dela
 DEFAULT_MAX_PAGE_WAIT_DELAY = 1.0  # used for random page wait delay
 MAX_CHECKOUT_BUTTON_WAIT = 3  # integers only
 DEFAULT_REFRESH_DELAY = 3
+
+
+def get_memory_usage(pids):
+    pids = set(pids)
+    physical = 0
+    vss = 0
+    log.info(f"Found {len(pids)} Chrome processes...")
+    for pid in pids:
+        try:
+            process = psutil.Process(pid)
+            with process.oneshot():
+                name = process.name()
+                status = process.status()
+                memory_info = process.memory_info()
+            if platform.system() == "Windows":
+                physical += memory_info.private
+                vss += memory_info.vms
+            else:
+                physical += memory_info.rss
+                vss += memory_info.vms
+        except NoSuchProcess:
+            log.warning(
+                f"Found rogue pid {pid} while calculating Chrome Memory Usage.  Ignoring."
+            )
+
+    log.info(
+        f"Total memory used by Chrome PIDs: {size(physical+vss, system=alternative):.2f}"
+    )
 
 
 class Amazon:
@@ -417,12 +447,19 @@ class Amazon:
     @debug
     def run_asins(self, delay):
         found_asin = False
+        loop_count = 0
         while not found_asin:
+            if loop_count % 10 == 0:
+                # Reload the PID list for the current set
+                self.get_webdriver_pids()
+                get_memory_usage(self.webdriver_child_pids)
+
             for i in range(len(self.asin_list)):
                 for asin in self.asin_list[i]:
                     if self.check_stock(asin, self.reserve_min[i], self.reserve_max[i]):
                         return asin
                     time.sleep(delay)
+                    loop_count += 1
 
     @debug
     def check_stock(self, asin, reserve_min, reserve_max, retry=0):
@@ -815,6 +852,7 @@ class Amazon:
         pid = self.driver.service.process.pid
         driver_process = psutil.Process(pid)
         children = driver_process.children(recursive=True)
+        self.webdriver_child_pids.clear()
         for child in children:
             self.webdriver_child_pids.append(child.pid)
 
