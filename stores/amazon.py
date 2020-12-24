@@ -101,7 +101,6 @@ class Amazon:
 
         global amazon_config
         from cli.cli import global_config
-
         amazon_config = global_config.get_amazon_config(encryption_pass)
 
         try:
@@ -953,7 +952,7 @@ class Amazon:
 
     def show_config(self):
         log.info(f"{'=' * 50}")
-        log.info(f"Starting Amazon ASIN Hunt for {len(self.asin_list)} Products with:")
+        log.info(f"Starting Amazon ASIN Hunt on {AMAZON_URLS['BASE_URL']} for {len(self.asin_list)} Products with:")
         log.info(f"--Delay of {self.refresh_delay} seconds")
         if self.used:
             log.info(f"--Used items are considered for purchase")
