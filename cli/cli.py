@@ -157,6 +157,7 @@ def amazon(
         disable_presence=disable_presence,
         slow_mode=slow_mode,
         no_image=no_image,
+        encryption_pass=p,
     )
     try:
         amzn_obj.run(delay=delay, test=test)

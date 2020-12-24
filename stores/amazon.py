@@ -75,6 +75,7 @@ class Amazon:
         disable_presence=False,
         slow_mode=False,
         no_image=False,
+        encryption_pass=None,
     ):
         self.notification_handler = notification_handler
         self.asin_list = []
@@ -101,7 +102,7 @@ class Amazon:
         global amazon_config
         from cli.cli import global_config
 
-        amazon_config = global_config.get_amazon_config()
+        amazon_config = global_config.get_amazon_config(encryption_pass)
 
         try:
             presence.start_presence()

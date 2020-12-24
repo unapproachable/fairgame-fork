@@ -39,13 +39,11 @@ class Config:
         # with open(GLOBAL_CONFIG_FILE) as json_config:
         #     self.global_config = json.load(json_config)
 
-    def get_amazon_config(self):
-        # TODO: Refactor this in case we still need a flag
-        encryption_pass = None
+    def get_amazon_config(self, encryption_pass=None):
         log.info("Initializing Amazon configuration...")
         # Load up all things Amazon
         amazon_config = self.global_config["AMAZON"]
         amazon_config["username"], amazon_config["password"] = get_credentials(
-            AMAZON_CREDENTIAL_FILE
+            AMAZON_CREDENTIAL_FILE, encryption_pass
         )
         return amazon_config
