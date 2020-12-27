@@ -45,4 +45,4 @@ stream_handler.setFormatter(
 
 log.addHandler(stream_handler)
 
-coloredlogs.install(LOGLEVEL, logger=log, fmt="%(asctime)s %(levelname)s - %(message)s")
+coloredlogs.install(LOGLEVEL, logger=log, fmt="%(asctime)s %(levelname)s %(message)s")
