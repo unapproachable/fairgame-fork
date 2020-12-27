@@ -4,6 +4,9 @@ from datetime import datetime
 from functools import wraps
 from signal import signal, SIGINT
 
+from common.config import Config
+from utils.version import check_version
+
 try:
     import click
 except ModuleNotFoundError:
