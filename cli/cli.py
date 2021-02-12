@@ -250,19 +250,23 @@ def amazon(
         log.error("Exiting Program...")
         time.sleep(5)
 
-
+@click.option(
+    "--slow-mode",
+    is_flag=True,
+    default=False,
+    help="Uses normal page load strategy for selenium. Default is none",
+)
 @click.option(
     "--delay", type=float, default=3.0, help="Time to wait between checks for item[s]"
 )
 @click.command()
-def amazonajax(delay):
+def amazonajax(delay, slow_mode):
     log.warning(
         "Experimental test balloon.  Do not attempt to use.  Your computer could catch fire."
     )
-    amazon_ajax_obj = AmazonStoreHandler(notification_handler)
+    amazon_ajax_obj = AmazonStoreHandler(notification_handler, slow_mode=slow_mode)
 
     try:
-
         amazon_ajax_obj.run(delay=delay)
     except RuntimeError:
         del amazon_ajax_obj

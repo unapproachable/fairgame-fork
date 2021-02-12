@@ -69,6 +69,25 @@ REALTIME_INVENTORY_PATH = f"/gp/aod/ajax?asin="
 CONFIG_FILE_PATH = "config/amazon_ajax_config.json"
 STORE_NAME = "Amazon"
 DEFAULT_MAX_TIMEOUT = 10
+CART_PAGE_PATH = "/gp/cart/view.html"
+CART_PAGE_SELECTOR = "//div[@id='sc-retail-cart-container']"
+GOTO_CHECKOUT_BUTTON_SELECTOR = "//input[@name='proceedToRetailCheckout']"
+# Step 1
+SHIPPING_ADDRESS_SELECT_PATH = "/gp/buy/addressselect/handlers/display.html"
+SHIPPING_ADDRESS_SELECT_SELECTOR = (
+    "//div[@id='shipaddress']//input[@data-testid='Address_selectShipToThisAddress']"
+)
+USE_THIS_ADDRESS_BUTTON_SELECTOR = "//input[@aria-labelledby='orderSummaryPrimaryActionBtn-announce' and @type='submit']"
+# Step 2
+PAYMENT_METHOD_PATH = "/gp/buy/payselect/handlers/display.html"
+PAYMENT_METHOD_SELECTOR = "//div[@id='payment']//div[@id='apx-content']"
+USE_THIS_PAYMENT_METHOD_BUTTON_SELECTOR = ""
+
+# Step 3
+PAYMENT_PAGE_PATH = "/gp/buy/payselect/handlers/display.html"
+PAYMENT_PAGE_SELECTOR = ""
+PLACE_YOUR_ORDER_BUTTON_SELECTOR = "//input[@name='placeYourOrder1' and @type='submit']"
+
 
 # Request
 HEADERS = {
@@ -92,20 +111,20 @@ class AmazonStoreHandler(BaseStoreHandler):
     http_session = True
 
     def __init__(
-        self,
-        notification_handler: NotificationHandler,
-        headless=False,
-        checkshipping=False,
-        detailed=False,
-        used=False,
-        single_shot=False,
-        no_screenshots=False,
-        disable_presence=False,
-        slow_mode=False,
-        no_image=False,
-        encryption_pass=None,
-        log_stock_check=False,
-        shipping_bypass=False,
+            self,
+            notification_handler: NotificationHandler,
+            headless=False,
+            checkshipping=False,
+            detailed=False,
+            used=False,
+            single_shot=False,
+            no_screenshots=False,
+            disable_presence=False,
+            slow_mode=False,
+            no_image=False,
+            encryption_pass=None,
+            log_stock_check=False,
+            shipping_bypass=False,
     ) -> None:
         super().__init__()
 
@@ -349,13 +368,10 @@ class AmazonStoreHandler(BaseStoreHandler):
     @contextmanager
     def wait_for_page_change(self, timeout=30):
         """Utility to help manage selenium waiting for a page to load after an action, like a click"""
-        kill_time = get_timeout(timeout)
         old_page = self.driver.find_element_by_tag_name("html")
         yield
-        WebDriverWait(self.driver, timeout).until(staleness_of(old_page))
-        # wait for page title to be non-blank
-        while self.driver.title == "" and time.time() < kill_time:
-            time.sleep(0.05)
+        WebDriverWait(self.driver, timeout).until(EC.staleness_of(old_page))
+        WebDriverWait(self.driver, timeout).until(EC.presence_of_element_located((By.XPATH, '//title')))
 
     def find_qualified_seller(self, item) -> SellerDetail or None:
         item_sellers = self.get_item_sellers(item, self.amazon_config["FREE_SHIPPING"])
@@ -396,9 +412,9 @@ class AmazonStoreHandler(BaseStoreHandler):
     def parse_items(self, json_items):
         for json_item in json_items:
             if (
-                "max-price" in json_item
-                and "asins" in json_item
-                and "min-price" in json_item
+                    "max-price" in json_item
+                    and "asins" in json_item
+                    and "min-price" in json_item
             ):
                 max_price = json_item["max-price"]
                 min_price = json_item["min-price"]
@@ -496,8 +512,8 @@ class AmazonStoreHandler(BaseStoreHandler):
                     "//form[contains(@action,'validateCaptcha')]"
                 )
                 if captcha_form_element:
-                    tree = solve_captcha(self.session, captcha_form_element[0], pdp_url)
-
+                    data, status = solve_captcha(self.session, captcha_form_element[0], pdp_url)
+                    tree = html.fromstring(data)
                 title = tree.xpath('//*[@id="productTitle"]')
                 if len(title) > 0:
                     item.name = title[0].text.strip()
@@ -554,7 +570,7 @@ class AmazonStoreHandler(BaseStoreHandler):
         # Get the pinned offer, if it exists, by checking for a pinned offer area and add to cart button
         pinned_offer = tree.xpath("//div[@id='aod-sticky-pinned-offer']")
         if not pinned_offer or not tree.xpath(
-            "//div[@id='aod-sticky-pinned-offer']//input[@name='submit.addToCart']"
+                "//div[@id='aod-sticky-pinned-offer']//input[@name='submit.addToCart']"
         ):
             log.debug(f"No pinned offer for {item.id} = {item.short_name}")
         else:
@@ -783,8 +799,8 @@ class AmazonStoreHandler(BaseStoreHandler):
         f = furl(url)
         if not f.scheme:
             f.set(scheme="https")
-        response = self.session.get(f.url, headers=HEADERS)
-        return response.text, response.status_code
+        # response = self.session.get(f.url, headers=HEADERS)
+        # return response.text, response.status_code
 
         # if self.http_client:
         #     # http.client method
@@ -803,17 +819,18 @@ class AmazonStoreHandler(BaseStoreHandler):
         #     return response.text, response.status_code
         # # else:
         # #
-        #     # Selenium
-        #     self.driver.get(url)
-        #     response_code = 200  # Just assume it's fine... ;-)
+        # Selenium
+        self.driver.get(f.url)
+        response_code = 200  # Just assume it's fine... ;-)
 
         # # Access requests via the `requests` attribute
-        # for request in self.driver.requests:
-        #     if request.url == url:
-        #         response_code = request.response.status_code
-        #         break
-        # data = self.driver.page_source
-        # return data, response_code
+        for request in self.driver.requests:
+            if request.url == url:
+                response_code = request.response.status_code
+                break
+        data = self.driver.page_source
+
+        return data, response_code
 
     # returns negative number if cart element does not exist, returns number if cart exists
     def get_cart_count(self):
@@ -876,11 +893,17 @@ def modify_browser_profile():
 def set_options(prefs, slow_mode):
     options.add_experimental_option("prefs", prefs)
     options.add_argument(f"user-data-dir=.profile-amz")
-    if not slow_mode:
-        options.set_capability("pageLoadStrategy", "none")
+    if slow_mode:
+        options.set_capability("pageLoadStrategy", "normal")
+    else:
+        options.set_capability("pageLoadStrategy", "eager")
 
 
 def get_prefs(no_image):
+    # For a list of Profile preferences,
+    # see https://github.com/chromium/chromium/blob/master/chrome/common/pref_names.cc
+    # and https://github.com/chromium/chromium/blob/master/chrome/browser/profiles/profile_impl.cc
+
     prefs = {
         "profile.password_manager_enabled": False,
         "credentials_enable_service": False,
