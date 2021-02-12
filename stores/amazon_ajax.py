@@ -6,6 +6,7 @@ import platform
 import random
 import time
 import typing
+import uuid
 from contextlib import contextmanager
 
 import psutil
@@ -15,12 +16,9 @@ from chromedriver_py import binary_path
 from furl import furl
 from lxml import html
 from price_parser import parse_price, Price
-from seleniumwire import webdriver
 from selenium.common.exceptions import (
     NoSuchElementException,
     TimeoutException,
-    WebDriverException,
-    ElementNotInteractableException,
 )
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -28,6 +26,7 @@ from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC, wait
 from selenium.webdriver.support.expected_conditions import staleness_of
 from selenium.webdriver.support.ui import WebDriverWait
+from seleniumwire import webdriver
 
 from common.amazon_support import (
     AmazonItemCondition,
@@ -41,11 +40,13 @@ from common.amazon_support import (
 from notifications.notifications import NotificationHandler
 from stores.basestore import BaseStoreHandler
 from utils.logger import log
-from utils.selenium_utils import enable_headless, options
+from utils.selenium_utils import enable_headless, options, save_page_source
 
 # PDP_URL = "https://smile.amazon.com/gp/product/"
 # AMAZON_DOMAIN = "www.amazon.com.au"
 # AMAZON_DOMAIN = "www.amazon.com.br"
+MAXIMUM_RETRY_TIME = 120
+DEFAULT_MAX_ATC_TRIES = 3
 AMAZON_DOMAIN = "www.amazon.ca"
 # NOT SUPPORTED AMAZON_DOMAIN = "www.amazon.cn"
 # AMAZON_DOMAIN = "www.amazon.fr"
@@ -61,14 +62,16 @@ AMAZON_DOMAIN = "www.amazon.ca"
 # AMAZON_DOMAIN = "www.amazon.se"
 
 PDP_PATH = f"/dp/"
+JUMP_PATH = f"/gp/buy/spc/handlers/display.html?hasWorkingJavascript=1"
 # REALTIME_INVENTORY_URL = f"{AMAZON_DOMAIN}gp/aod/ajax/ref=aod_f_new?asin="
 # REALTIME_INVENTORY_PATH = f"/gp/aod/ajax/ref=aod_f_new?isonlyrenderofferlist=true&asin="
 # REALTIME_INVENTORY_URL = "https://www.amazon.com/gp/aod/ajax/ref=dp_aod_NEW_mbc?asin="
-REALTIME_INVENTORY_PATH = f"/gp/aod/ajax?asin="
+REALTIME_INVENTORY_PATH = f"/gp/aod/ajax?isonlyrenderofferlist=true&asin="
 
 CONFIG_FILE_PATH = "config/amazon_ajax_config.json"
 STORE_NAME = "Amazon"
 DEFAULT_MAX_TIMEOUT = 10
+
 CART_PAGE_PATH = "/gp/cart/view.html"
 CART_PAGE_SELECTOR = "//div[@id='sc-retail-cart-container']"
 GOTO_CHECKOUT_BUTTON_SELECTOR = "//input[@name='proceedToRetailCheckout']"
@@ -88,7 +91,6 @@ PAYMENT_PAGE_PATH = "/gp/buy/payselect/handlers/display.html"
 PAYMENT_PAGE_SELECTOR = ""
 PLACE_YOUR_ORDER_BUTTON_SELECTOR = "//input[@name='placeYourOrder1' and @type='submit']"
 
-
 # Request
 HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -105,31 +107,41 @@ def free_shipping_check(seller):
         return True
 
 
+def retry_check(start_time):
+    runtime = int(round(time.time() - start_time))
+    log.info(f"Retry timer is at {runtime} of {MAXIMUM_RETRY_TIME}")
+    if runtime > MAXIMUM_RETRY_TIME:
+        log.warning("Retry timer expired.  Giving up.")
+        # give up
+        return False
+    return True
+
+
 class AmazonStoreHandler(BaseStoreHandler):
     http_client = False
     http_20_client = False
     http_session = True
 
     def __init__(
-            self,
-            notification_handler: NotificationHandler,
-            headless=False,
-            checkshipping=False,
-            detailed=False,
-            used=False,
-            single_shot=False,
-            no_screenshots=False,
-            disable_presence=False,
-            slow_mode=False,
-            no_image=False,
-            encryption_pass=None,
-            log_stock_check=False,
-            shipping_bypass=False,
+        self,
+        notification_handler: NotificationHandler,
+        headless=False,
+        checkshipping=False,
+        detailed=False,
+        used=False,
+        single_shot=False,
+        no_screenshots=False,
+        disable_presence=False,
+        slow_mode=False,
+        no_image=False,
+        encryption_pass=None,
+        log_stock_check=False,
+        shipping_bypass=False,
     ) -> None:
         super().__init__()
 
         self.shuffle = True
-
+        self.testing = True
         self.notification_handler = notification_handler
         self.check_shipping = checkshipping
         self.item_list: typing.List[FGItem] = []
@@ -137,20 +149,22 @@ class AmazonStoreHandler(BaseStoreHandler):
         self.start_time = int(time.time())
         self.amazon_domain = "smile.amazon.com"
         self.webdriver_child_pids = []
+        self.start_time = time.time()
+        self.start_time_atc = 0
         self.take_screenshots = not no_screenshots
         from cli.cli import global_config
 
         self.amazon_config = global_config.get_amazon_config(encryption_pass)
 
         # Load up our configuration
-        self.parse_config()
+        config = self.parse_config()
 
         # Set up the Chrome options based on user flags
         if headless:
             enable_headless()
 
-        prefs = get_prefs(no_image)
-        set_options(prefs, slow_mode=slow_mode)
+        prefs = get_prefs(config.get("no_image", False))
+        set_options(prefs, slow_mode=True)
         modify_browser_profile()
 
         # Initialize the Session we'll use for this run
@@ -160,7 +174,9 @@ class AmazonStoreHandler(BaseStoreHandler):
         # self.conn20 = HTTP20Connection(self.amazon_domain)
 
         # Spawn the web browser
-        self.driver = create_driver(options)
+        self.driver: webdriver.Chrome = create_driver(
+            options, [f".*{self.amazon_domain}.*"]
+        )
         self.webdriver_child_pids = get_webdriver_pids(self.driver)
 
     def __del__(self):
@@ -254,7 +270,7 @@ class AmazonStoreHandler(BaseStoreHandler):
             log.error("Remember me checkbox did not exist")
 
         log.info("Inputting Password")
-        captcha_entry: WebElement = None
+        captcha_entry: typing.List[WebElement] = []
         try:
             password_field = WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.XPATH, '//*[@id="ap_password"]'))
@@ -263,7 +279,7 @@ class AmazonStoreHandler(BaseStoreHandler):
             password_field.send_keys(self.amazon_config["password"])
             # check for captcha
             try:
-                captcha_entry = self.driver.find_element_by_xpath(
+                captcha_entry = self.driver.find_elements_by_xpath(
                     '//*[@id="auth-captcha-guess"]'
                 )
             except NoSuchElementException:
@@ -294,8 +310,8 @@ class AmazonStoreHandler(BaseStoreHandler):
                         "Solving catpcha", "captcha", self.take_screenshots
                     )
                     with self.wait_for_page_change(timeout=10):
-                        captcha_entry.clear()
-                        captcha_entry.send_keys(solution + Keys.RETURN)
+                        captcha_entry[0].clear()
+                        captcha_entry[0].send_keys(solution + Keys.RETURN)
 
             except Exception as e:
                 log.debug(e)
@@ -328,7 +344,7 @@ class AmazonStoreHandler(BaseStoreHandler):
 
         log.info(f'Logged in as {self.amazon_config["username"]}')
 
-    def run(self, delay=3):
+    def run(self, delay=10, test=False):
         # Load up the homepage
         with self.wait_for_page_change():
             self.driver.get(f"https://{self.amazon_domain}")
@@ -354,27 +370,39 @@ class AmazonStoreHandler(BaseStoreHandler):
         self.notification_handler.send_notification(message)
 
         while self.item_list:
-
+            group_id_to_remove = None
             for item in self.item_list:
-                qualified_seller = self.find_qualified_seller(item)
+                qualified_seller: SellerDetail = self.find_qualified_seller(item)
                 if qualified_seller:
-                    successful = self.attempt_purchase(item, qualified_seller)
+                    successful = self.attempt_purchase(item, qualified_seller, test)
                     if successful:
+                        group_id_to_remove = item.group_id
+                        break
+                # time.sleep(delay + random.randint(0, 3))
+            if group_id_to_remove:
+                for item in self.item_list:
+                    # Remove all items that were in the same group as this purchase
+                    if item.group_id == group_id_to_remove:
+                        log.info(f"Removing {item.short_name} from the hunt.")
                         self.item_list.remove(item)
-                time.sleep(delay + random.randint(0, 3))
             if self.shuffle:
                 random.shuffle(self.item_list)
+            time.sleep(delay + random.randint(0, 3))
+        log.info("No more items on the list to hunt.  Exiting...")
 
     @contextmanager
     def wait_for_page_change(self, timeout=30):
         """Utility to help manage selenium waiting for a page to load after an action, like a click"""
         old_page = self.driver.find_element_by_tag_name("html")
         yield
-        WebDriverWait(self.driver, timeout).until(EC.staleness_of(old_page))
-        WebDriverWait(self.driver, timeout).until(EC.presence_of_element_located((By.XPATH, '//title')))
+        WebDriverWait(self.driver, timeout).until(staleness_of(old_page))
+        WebDriverWait(self.driver, timeout).until(
+            EC.presence_of_element_located((By.XPATH, "//title"))
+        )
 
     def find_qualified_seller(self, item) -> SellerDetail or None:
         item_sellers = self.get_item_sellers(item, self.amazon_config["FREE_SHIPPING"])
+        log.info(f"Found {len(item_sellers)} offers for {item.short_name}")
         for seller in item_sellers:
             if not self.check_shipping and not free_shipping_check(seller):
                 log.debug("Failed shipping hurdle.")
@@ -398,7 +426,7 @@ class AmazonStoreHandler(BaseStoreHandler):
             with open(CONFIG_FILE_PATH) as json_file:
                 config = json.load(json_file)
                 self.amazon_domain = config.get("amazon_domain", "smile.amazon.com")
-
+                self.jump_url = f"https://{self.amazon_domain}{JUMP_PATH}"
                 json_items = config.get("items")
                 self.parse_items(json_items)
 
@@ -408,13 +436,14 @@ class AmazonStoreHandler(BaseStoreHandler):
             )
             exit(1)
         log.info(f"Found {len(self.item_list)} items to track at {STORE_NAME}.")
+        return config
 
     def parse_items(self, json_items):
         for json_item in json_items:
             if (
-                    "max-price" in json_item
-                    and "asins" in json_item
-                    and "min-price" in json_item
+                "max-price" in json_item
+                and "asins" in json_item
+                and "min-price" in json_item
             ):
                 max_price = json_item["max-price"]
                 min_price = json_item["min-price"]
@@ -440,12 +469,15 @@ class AmazonStoreHandler(BaseStoreHandler):
                     )
                     # did the user forget to put us in an array?
                     asins_collection = asins_collection.split(",")
+                # Use group_id to link together ASINs that can be remove together once a purchase is made
+                group_id = str(uuid.uuid4())
                 for asin in asins_collection:
                     self.item_list.append(
                         FGItem(
-                            asin,
-                            min_price,
-                            max_price,
+                            id=asin,
+                            group_id=group_id,
+                            min_price=min_price,
+                            max_price=max_price,
                             condition=condition,
                         )
                     )
@@ -505,15 +537,17 @@ class AmazonStoreHandler(BaseStoreHandler):
 
             if status == 200:
                 item.furl = furl(
-                    f"https://{self.amazon_domain}/{REALTIME_INVENTORY_PATH}{item.id}"
+                    f"https://{self.amazon_domain}{REALTIME_INVENTORY_PATH}{item.id}"
                 )
                 tree = html.fromstring(data)
                 captcha_form_element = tree.xpath(
                     "//form[contains(@action,'validateCaptcha')]"
                 )
                 if captcha_form_element:
-                    data, status = solve_captcha(self.session, captcha_form_element[0], pdp_url)
-                    tree = html.fromstring(data)
+                    tree, status = solve_captcha(
+                        self.session, captcha_form_element[0], pdp_url
+                    )
+
                 title = tree.xpath('//*[@id="productTitle"]')
                 if len(title) > 0:
                     item.name = title[0].text.strip()
@@ -570,43 +604,18 @@ class AmazonStoreHandler(BaseStoreHandler):
         # Get the pinned offer, if it exists, by checking for a pinned offer area and add to cart button
         pinned_offer = tree.xpath("//div[@id='aod-sticky-pinned-offer']")
         if not pinned_offer or not tree.xpath(
-                "//div[@id='aod-sticky-pinned-offer']//input[@name='submit.addToCart']"
+            "//div[@id='aod-sticky-pinned-offer']//input[@name='submit.addToCart']"
         ):
             log.debug(f"No pinned offer for {item.id} = {item.short_name}")
         else:
             for idx, offer in enumerate(pinned_offer):
-                merchant_name = offer.xpath(
-                    ".//span[@class='a-size-small a-color-base']"
-                )[0].text.strip()
-                price_text = offer.xpath(".//span[@class='a-price-whole']")[0].text
-                price = parse_price(price_text)
-                shipping_cost = get_shipping_costs(offer, free_shipping_strings)
-                form_action = offer.xpath(".//form[contains(@action,'add-to-cart')]")[
-                    0
-                ].action
-                condition_heading = offer.xpath(".//div[@id='aod-offer-heading']/h5")
-                if condition_heading:
-                    condition = AmazonItemCondition.from_str(
-                        condition_heading[0].text.strip()
-                    )
-                else:
-                    condition = AmazonItemCondition.Unknown
-                offers = offer.xpath(f".//input[@name='offeringID.1']")
-                offer_id = None
-                if len(offers) > 0:
-                    offer_id = offers[0].value
-                else:
-                    log.error("No offer ID found!")
-
-                seller = SellerDetail(
-                    merchant_name,
-                    price,
-                    shipping_cost,
-                    condition,
-                    form_action,
-                    offer_id,
+                self.parse_offer(
+                    free_shipping_strings,
+                    offer,
+                    sellers,
+                    merchant_name_xpath=".//span[@class='a-size-small a-color-base']",
+                    price_text_xpath=".//span[@class='a-price-whole']",
                 )
-                sellers.append(seller)
 
         offers = tree.xpath("//div[@id='aod-offer']")
         if not offers:
@@ -617,40 +626,56 @@ class AmazonStoreHandler(BaseStoreHandler):
             # merchant_name = offer.xpath(
             #     ".//a[@target='_blank' and contains(@href, 'merch_name')]"
             # )[0].text.strip()
-            merchant_name = offer.xpath(".//a[@target='_blank']")[0].text.strip()
-            price_text = offer.xpath(
-                ".//div[contains(@id, 'aod-price-')]//span[contains(@class,'a-offscreen')]"
-            )[0].text
-            price = parse_price(price_text)
-
-            shipping_cost = get_shipping_costs(offer, free_shipping_strings)
-            form_action = offer.xpath(".//form[contains(@action,'add-to-cart')]")[
-                0
-            ].action
-            condition_heading = offer.xpath(".//div[@id='aod-offer-heading']/h5")
-            if condition_heading:
-                condition = AmazonItemCondition.from_str(
-                    condition_heading[0].text.strip()
-                )
-            else:
-                condition = AmazonItemCondition.Unknown
-            offers = offer.xpath(f".//input[@name='offeringID.1']")
-            offer_id = None
-            if len(offers) > 0:
-                offer_id = offers[0].value
-            else:
-                log.error("No offer ID found!")
-
-            seller = SellerDetail(
-                merchant_name,
-                price,
-                shipping_cost,
-                condition,
-                form_action,
-                offer_id,
+            self.parse_offer(
+                free_shipping_strings,
+                offer,
+                sellers,
+                merchant_name_xpath=".//a[@target='_blank']",
+                price_text_xpath=".//div[contains(@id, 'aod-price-')]//span[contains(@class,'a-offscreen')]",
             )
-            sellers.append(seller)
+
         return sellers
+
+    def parse_offer(
+        self,
+        free_shipping_strings,
+        offer,
+        sellers,
+        merchant_name_xpath,
+        price_text_xpath,
+    ):
+        merchant_name = offer.xpath(merchant_name_xpath)
+        if merchant_name:
+            merchant_name = merchant_name[0].text.strip()
+        else:
+            log.warning(f"Unable to parse Merchant Name using '{merchant_name_xpath} ")
+            save_page_source("unknown_merchant")
+            merchant_name: "Unknown Merchant"
+        price_text = offer.xpath(price_text_xpath)[0].text
+        price = parse_price(price_text)
+        shipping_cost = get_shipping_costs(offer, free_shipping_strings)
+        # Used to determine item condition
+        form_action = offer.xpath(".//form[contains(@action,'add-to-cart')]")[0].action
+        condition_heading = offer.xpath(".//div[@id='aod-offer-heading']/h5")
+        if condition_heading:
+            condition = AmazonItemCondition.from_str(condition_heading[0].text.strip())
+        else:
+            condition = AmazonItemCondition.Unknown
+        # OfferingID.1 is the item itself.  Other offeringIDs (.2, .3, etc.) seem to be warranties, etc.)
+        offers = offer.xpath(f".//input[@name='offeringID.1']")
+        offer_id = None
+        if len(offers) > 0:
+            offer_id = offers[0].value
+        else:
+            log.error("No offer ID found!")
+        seller = SellerDetail(
+            name=merchant_name,
+            price=price,
+            shipping_cost=shipping_cost,
+            condition=condition,
+            offering_id=offer_id,
+        )
+        sellers.append(seller)
 
     def get_real_time_data(self, item):
         log.debug(f"Calling {STORE_NAME} for {item.short_name} using {item.furl.url}")
@@ -664,65 +689,140 @@ class AmazonStoreHandler(BaseStoreHandler):
             item.status_code = status
         return data
 
-    def attempt_purchase(self, item, qualified_seller):
+    def attempt_atc(self, offering_id, max_atc_retries=DEFAULT_MAX_ATC_TRIES):
+        log.info("Attempting Add To Cart with offer ID...")
         # Open the add.html URL in Selenium
-        f = f"https://smile.amazon.com/gp/aws/cart/add.html?OfferListingId.1={qualified_seller.offering_id}&Quantity.1=1"
-
-        with self.wait_for_page_change(timeout=5):
-            self.driver.get(f)
-            # log.info("Try to ATC and Buy from HERE!")
-            # Click the continue button on the add.html page
-            # TODO: implement logic to confirm there is quantity available
-
-            xpath = "//input[@alt='Continue']"
-            if wait_for_element_by_xpath(self.driver, xpath):
-                try:
-                    with self.wait_for_page_change():
-                        self.driver.find_element_by_xpath(xpath).click()
-                except NoSuchElementException:
+        f = f"https://smile.amazon.com/gp/aws/cart/add.html?OfferListingId.1={offering_id}&Quantity.1=1"
+        atc_attempts = 0
+        while atc_attempts < max_atc_retries:
+            with self.wait_for_page_change(timeout=DEFAULT_MAX_TIMEOUT):
+                self.driver.get(f)
+                xpath = "//input[@alt='Continue']"
+                if wait_for_element_by_xpath(self.driver, xpath):
+                    try:
+                        with self.wait_for_page_change(timeout=10):
+                            self.driver.find_element_by_xpath(xpath).click()
+                    except NoSuchElementException:
+                        log.error("Continue button not present on page")
+                else:
                     log.error("Continue button not present on page")
-            else:
-                log.error("Continue button not present on page")
 
-        # verify cart is non-zero
-        if self.get_cart_count() != 0:
+                # verify cart is non-zero
+                if self.get_cart_count() != 0:
+                    return True
+                else:
+                    atc_attempts = atc_attempts + 1
+        return False
 
-            CHECKOUT_TITLES = [
-                "Amazon.com Checkout",
-                "Amazon.co.uk Checkout",
-                "Place Your Order - Amazon.ca Checkout",
-                "Place Your Order - Amazon.co.uk Checkout",
-                "Amazon.de Checkout",
-                "Place Your Order - Amazon.de Checkout",
-                "Amazon.de - Bezahlvorgang",
-                "Bestellung aufgeben - Amazon.de-Bezahlvorgang",
-                "Place Your Order - Amazon.com Checkout",
-                "Place Your Order - Amazon.com",
-                "Tramitar pedido en Amazon.es",
-                "Processus de paiement Amazon.com",
-                "Confirmar pedido - Compra Amazon.es",
-                "Passez votre commande - Processus de paiement Amazon.fr",
-                "Ordina - Cassa Amazon.it",
-                "AmazonSmile Checkout",
-                "Plaats je bestelling - Amazon.nl-kassa",
-                "Place Your Order - AmazonSmile Checkout",
-                "Preparing your order",
-                "Ihre Bestellung wird vorbereitet",
-                "Pagamento Amazon.it",
-            ]
+    def attempt_purchase(
+        self, item: FGItem, qualified_seller: SellerDetail, testing=False
+    ):
+        self.start_time_atc = time.time()
+        # Get the item button and click it
+        offer_page = self.driver.current_url
+        keep_trying = True
+        start_time = time.time()
+        log.info(
+            f"Attempting to purchase {item.short_name} for {qualified_seller.selling_price}..."
+        )
+        while keep_trying:
+            # Keep trying to ATC until MAXIMUM_RETRY_TIME seconds have passed
+            atc_success = self.attempt_atc(
+                offering_id=qualified_seller.offering_id,
+                max_atc_retries=DEFAULT_MAX_ATC_TRIES,
+            )
+            # Check for an empty cart
+            if not atc_success:
+                # We have an empty cart, so go back to the offer page, reload, and retry ATC
+                log.warning(
+                    "Empty Cart!  Returning to offer page to try to find the ATC again..."
+                )
+                with self.wait_for_page_change(timeout=DEFAULT_MAX_TIMEOUT):
+                    self.driver.get(offer_page)
+                keep_trying = retry_check(start_time)
+                continue
 
-            while self.driver.title not in CHECKOUT_TITLES:
-                # try to go directly to cart page:
-                with self.wait_for_page_change(timeout=10):
-                    self.driver.get(
-                        f"https://{self.amazon_domain}/gp/buy/spc/handlers/display.html?hasWorkingJavascript=1"
+            while keep_trying:
+                start_time = time.time()
+                log.info(
+                    f"On the page with the title '{self.driver.title}'.  Jumping the line..."
+                )
+                # Jump the line to the final step of checkout...
+                with self.wait_for_page_change(timeout=DEFAULT_MAX_TIMEOUT):
+                    self.driver.get(self.jump_url)
+
+                # Check for "Your Store" page ... happens if we don't wait long enough for the ATC
+                your_store_elements = self.driver.find_elements_by_xpath(
+                    "//div[@id='ys-card']//div[@id='ys-top']"
+                )
+                if your_store_elements:
+                    log.warning(
+                        "Found Your Store page instead of checkout.  Trying to jump the line again!"
+                    )
+                    keep_trying = retry_check(start_time)
+                    continue
+
+                # Get the Place Order buttons
+                try:
+                    pyo_btns: typing.List[WebElement] = WebDriverWait(
+                        self.driver, timeout=DEFAULT_MAX_TIMEOUT
+                    ).until(
+                        lambda d: d.find_elements_by_xpath(
+                            "//input[@name='placeYourOrder1']"
+                        )
                     )
 
-        successful = self.handle_checkout()
-        time.sleep(300)
-        if successful:
-            return True
-        else:
+                    if pyo_btns:
+                        # Try all the buttons
+                        log.info(
+                            f"Found {len(pyo_btns)} Place Your Order buttons.  Trying them now..."
+                        )
+                        for pyo_btn in pyo_btns:
+                            try:
+                                if pyo_btn.is_displayed() and pyo_btn.is_enabled():
+                                    if testing:
+                                        attributes = self.driver.execute_script(
+                                            "var items = {}; "
+                                            "for (index = 0; index < arguments[0].attributes.length; ++index) { "
+                                            "   items[arguments[0].attributes[index].name] "
+                                            "   = "
+                                            "   arguments[0].attributes[index].value "
+                                            "}; "
+                                            "return items;",
+                                            pyo_btn,
+                                        )
+                                        log.info(
+                                            f"Would have clicked this button: {attributes}"
+                                        )
+                                    else:
+                                        log.info(f"Submitting line jumped order...")
+                                        with self.wait_for_page_change(
+                                            timeout=DEFAULT_MAX_TIMEOUT
+                                        ):
+                                            pyo_btn.click()
+                                    log.info(
+                                        f"Checkout completed in {time.time() - self.start_time_atc} seconds"
+                                    )
+                                    return True
+                            except Exception as e:
+                                log.warning(
+                                    "Caught exception trying to click a Place Your Order Button.  "
+                                    "Ignoring and trying next button."
+                                )
+                                log.exception(e)
+                                pass
+                    else:
+                        log.error("Did not find any Place Your Order buttons!")
+                        keep_trying = retry_check(start_time)
+                except Exception as e:
+                    log.error(
+                        "Caught exception trying to locate Place Your Order buttons.  Ignoring and trying next button."
+                    )
+                    log.exception(e)
+                    keep_trying = retry_check(start_time)
+                    pass
+                if keep_trying:
+                    log.info("Retying...")
             return False
 
     def navigate_purchase(self):
@@ -734,6 +834,7 @@ class AmazonStoreHandler(BaseStoreHandler):
         timeout = get_timeout()
 
         button_xpaths = [
+            '//input[@name="placeYourOrder1"]',
             '//*[@id="submitOrderButtonId"]/span/input',
             '//*[@id="bottomSubmitOrderButtonId"]/span/input',
             '//*[@id="placeYourOrder"]/span/input',
@@ -823,13 +924,13 @@ class AmazonStoreHandler(BaseStoreHandler):
         self.driver.get(f.url)
         response_code = 200  # Just assume it's fine... ;-)
 
-        # # Access requests via the `requests` attribute
+        # Access requests via the `requests` attribute
+
         for request in self.driver.requests:
             if request.url == url:
                 response_code = request.response.status_code
                 break
         data = self.driver.page_source
-
         return data, response_code
 
     # returns negative number if cart element does not exist, returns number if cart exists
@@ -860,9 +961,13 @@ def new_first(seller: SellerDetail):
     return seller.condition
 
 
-def create_driver(options):
+def create_driver(options, domain_scopes=[]) -> webdriver.Chrome:
     try:
-        return webdriver.Chrome(executable_path=binary_path, options=options)
+        webdriver_chrome = webdriver.Chrome(
+            executable_path=binary_path, options=options
+        )
+        webdriver_chrome.scopes = domain_scopes
+        return webdriver_chrome
     except Exception as e:
         log.error(e)
         log.error(
@@ -900,10 +1005,6 @@ def set_options(prefs, slow_mode):
 
 
 def get_prefs(no_image):
-    # For a list of Profile preferences,
-    # see https://github.com/chromium/chromium/blob/master/chrome/common/pref_names.cc
-    # and https://github.com/chromium/chromium/blob/master/chrome/browser/profiles/profile_impl.cc
-
     prefs = {
         "profile.password_manager_enabled": False,
         "credentials_enable_service": False,

@@ -16,6 +16,7 @@
 #
 #      The author may be contacted through the project's GitHub, at:
 #      https://github.com/Hari-Nagarajan/fairgame
+from datetime import datetime
 
 import requests
 from selenium.webdriver.chrome.options import Options
@@ -34,6 +35,8 @@ options.add_experimental_option(
 options.add_experimental_option("useAutomationExtension", False)
 # CHROME ONLY option to prevent Restore Session popup
 options.add_argument("--disable-session-crashed-bubble")
+options.add_argument("--enable-parallel-downloading")
+options.add_argument("--enable-quic")
 selenium_logger.setLevel(logging_WARNING)
 urllib_logger.setLevel(logging_WARNING)
 
@@ -155,3 +158,25 @@ def enable_headless():
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+
+
+def save_page_source(page_title, webdriver):
+    """Saves DOM at the current state when called.  This includes state changes from DOM manipulation via JS
+    :param webdriver:
+    """
+    file_name = get_timestamp_filename("html_saves/" + page_title + "_source", "html")
+
+    page_source = webdriver.driver.page_source
+    with open(file_name, "w", encoding="utf-8") as f:
+        f.write(page_source)
+
+
+def get_timestamp_filename(name, extension):
+    """Utility method to create a filename with a timestamp appended to the root and before
+    the provided file extension"""
+    now = datetime.now()
+    date = now.strftime("%m-%d-%Y_%H_%M_%S")
+    if extension.startswith("."):
+        return name + "_" + date + extension
+    else:
+        return name + "_" + date + "." + extension

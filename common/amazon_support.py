@@ -1,3 +1,4 @@
+import uuid
 from decimal import Decimal
 from enum import Enum
 
@@ -19,6 +20,7 @@ class AmazonItemCondition(Enum):
     Refurbished = 20
     Rental = 30
     Open_box = 40
+    Used = 40
     UsedLikeNew = 40
     UsedVeryGood = 50
     UsedGood = 60
@@ -33,6 +35,9 @@ class AmazonItemCondition(Enum):
     def from_str(cls, label):
         # Straight lookup
         try:
+            if label.strip() == "":
+                return AmazonItemCondition.Unknown
+
             condition = AmazonItemCondition[label]
             return condition
         except KeyError:
@@ -42,7 +47,8 @@ class AmazonItemCondition(Enum):
             try:
                 condition = AmazonItemCondition[cleaned_label]
                 return condition
-            except KeyError:
+            except KeyError as ke:
+                log.error(f"Found invalid Item Condition Key: {label}")
                 raise NotImplementedError
 
 
@@ -52,9 +58,13 @@ class SellerDetail:
     price: Price
     shipping_cost: Price
     condition: int = AmazonItemCondition.New
-    atc_url: str = None
+    # Unique identifier for the offer within the offers listing
     offering_id: str = None
-    xpath = f"//form[@action='{atc_url}'//input[@name='submit.addToCart']"
+    # Unique identifier for the ATC button specifically for this unique offer
+
+    @property
+    def xpath(self) -> str:
+        return f"//input[@value='{self.offering_id}']/following::span[1]//input[@name='submit.addToCart']"
 
     @property
     def selling_price(self) -> Decimal:
@@ -64,6 +74,7 @@ class SellerDetail:
 @attr.s(auto_attribs=True)
 class FGItem:
     id: str
+    group_id: str
     min_price: Price
     max_price: Price
     name: str = None
@@ -176,8 +187,8 @@ def get_shipping_costs(tree, free_shipping_string):
             for free_message in free_shipping_string
         ):
             # We found some version of "free" inside the span.. but this relies on a match
-            log.warning(
-                f"Assuming free shipping based on this message: '{shipping_span_text}'"
+            log.debug(
+                f"Free shipping text match on this message: '{shipping_span_text}'"
             )
         else:
             log.error(
@@ -240,7 +251,7 @@ def solve_captcha(session, form_element, pdp_url: str):
             f.add(args=input_dict)
             response = session.get(f.url)
             log.debug(f"Captcha response was {response.status_code}")
-            return response.text, response.status_code
+            return html.fromstring(response.text), response.status_code
 
     return html.fromstring(""), 404
 

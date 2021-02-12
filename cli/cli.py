@@ -191,6 +191,12 @@ def main():
     default=False,
     help="Purge Amazon credentials and prompt for new credentials",
 )
+@click.option(
+    "--alt-offers",
+    is_flag=True,
+    default=False,
+    help="Directly hit the offers page.  Preferred, but deprecated by Amazon.",
+)
 @notify_on_crash
 def amazon(
     no_image,
@@ -210,6 +216,7 @@ def amazon(
     shipping_bypass,
     clean_profile,
     clean_credentials,
+    alt_offers,
 ):
     notification_handler.sound_enabled = not disable_sound
     if not notification_handler.sound_enabled:
@@ -241,6 +248,7 @@ def amazon(
         encryption_pass=p,
         log_stock_check=log_stock_check,
         shipping_bypass=shipping_bypass,
+        alt_offers=alt_offers,
     )
 
     try:
@@ -250,6 +258,10 @@ def amazon(
         log.error("Exiting Program...")
         time.sleep(5)
 
+
+@click.option(
+    "--delay", type=float, default=3.0, help="Time to wait between checks for item[s]"
+)
 @click.option(
     "--slow-mode",
     is_flag=True,
@@ -257,18 +269,24 @@ def amazon(
     help="Uses normal page load strategy for selenium. Default is none",
 )
 @click.option(
-    "--delay", type=float, default=3.0, help="Time to wait between checks for item[s]"
+    "--test",
+    is_flag=True,
+    default=False,
+    help="Run the checkout flow, but do not actually purchase the item[s]",
 )
 @click.command()
-def amazonajax(delay, slow_mode):
+def amazonajax(delay, slow_mode, test):
     log.warning(
         "Experimental test balloon.  Do not attempt to use.  Your computer could catch fire."
     )
     amazon_ajax_obj = AmazonStoreHandler(notification_handler, slow_mode=slow_mode)
 
     try:
-        amazon_ajax_obj.run(delay=delay)
-    except RuntimeError:
+
+        amazon_ajax_obj.run(delay=delay, test=test)
+    except RuntimeError as rte:
+        log.error("Runtime error has occurred.")
+        log.exception(rte)
         del amazon_ajax_obj
         log.error("Exiting Program...")
         time.sleep(5)
