@@ -66,7 +66,8 @@ JUMP_PATH = f"/gp/buy/spc/handlers/display.html?hasWorkingJavascript=1"
 # REALTIME_INVENTORY_URL = f"{AMAZON_DOMAIN}gp/aod/ajax/ref=aod_f_new?asin="
 # REALTIME_INVENTORY_PATH = f"/gp/aod/ajax/ref=aod_f_new?isonlyrenderofferlist=true&asin="
 # REALTIME_INVENTORY_URL = "https://www.amazon.com/gp/aod/ajax/ref=dp_aod_NEW_mbc?asin="
-REALTIME_INVENTORY_PATH = f"/gp/aod/ajax?isonlyrenderofferlist=true&asin="
+# REALTIME_INVENTORY_PATH = f"/gp/aod/ajax?isonlyrenderofferlist=true&asin="
+REALTIME_INVENTORY_PATH = f"/gp/aod/ajax?asin="
 
 CONFIG_FILE_PATH = "config/amazon_ajax_config.json"
 STORE_NAME = "Amazon"
@@ -318,6 +319,9 @@ class AmazonStoreHandler(BaseStoreHandler):
                 log.info("Error trying to solve captcha. Refresh and retry.")
                 self.driver.refresh()
                 time.sleep(5)
+        else:
+            with self.wait_for_page_change(timeout=10):
+                password_field.send_keys(Keys.RETURN)
 
         # Deal with 2FA
         if self.driver.title in self.amazon_config["TWOFA_TITLES"]:
@@ -589,6 +593,18 @@ class AmazonStoreHandler(BaseStoreHandler):
 
         return True
 
+    def get_add_info(self, data):
+        tree = html.fromstring(data)
+        try:
+            quantity = tree.xpath("//input[@name='Quantity.1']")[0].text
+        except:
+            quantity = 0
+        try:
+            price = tree.xpath("//td[@class='price item-row']")[0].text
+        except:
+            price = "$0.00"
+        return price, quantity
+
     def get_item_sellers(self, item, free_shipping_strings):
         """Parse out information to from the aod-offer nodes populate ItemDetail instances for each item """
         payload = self.get_real_time_data(item)
@@ -696,22 +712,27 @@ class AmazonStoreHandler(BaseStoreHandler):
         atc_attempts = 0
         while atc_attempts < max_atc_retries:
             with self.wait_for_page_change(timeout=DEFAULT_MAX_TIMEOUT):
-                self.driver.get(f)
-                xpath = "//input[@alt='Continue']"
-                if wait_for_element_by_xpath(self.driver, xpath):
-                    try:
-                        with self.wait_for_page_change(timeout=10):
-                            self.driver.find_element_by_xpath(xpath).click()
-                    except NoSuchElementException:
+                # get the quantity info (also price if useful later to confirm)
+                data, status = self.get_html(f)
+                price, quantity = self.get_add_info(data=data)
+                # TODO: pull in price info for check?
+                # price_amount = parse_price(price)
+                if quantity != 0:
+                    xpath = "//input[@alt='Continue']"
+                    if wait_for_element_by_xpath(self.driver, xpath):
+                        try:
+                            with self.wait_for_page_change(timeout=10):
+                                self.driver.find_element_by_xpath(xpath).click()
+                        except NoSuchElementException:
+                            log.error("Continue button not present on page")
+                    else:
                         log.error("Continue button not present on page")
-                else:
-                    log.error("Continue button not present on page")
 
-                # verify cart is non-zero
-                if self.get_cart_count() != 0:
-                    return True
-                else:
-                    atc_attempts = atc_attempts + 1
+                    # verify cart is non-zero
+                    if self.get_cart_count() != 0:
+                        return True
+
+                atc_attempts = atc_attempts + 1
         return False
 
     def attempt_purchase(
