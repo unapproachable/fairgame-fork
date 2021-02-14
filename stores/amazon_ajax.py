@@ -165,7 +165,7 @@ class AmazonStoreHandler(BaseStoreHandler):
             enable_headless()
 
         prefs = get_prefs(config.get("no_image", False))
-        set_options(prefs, slow_mode=True)
+        set_options(prefs, slow_mode=False)
         modify_browser_profile()
 
         # Initialize the Session we'll use for this run
@@ -765,6 +765,7 @@ class AmazonStoreHandler(BaseStoreHandler):
 
             while keep_trying:
                 start_time = time.time()
+                time.sleep(2)
                 log.info(
                     f"On the page with the title '{self.driver.title}'.  Jumping the line..."
                 )
@@ -846,75 +847,75 @@ class AmazonStoreHandler(BaseStoreHandler):
                     log.info("Retying...")
             return False
 
-    def navigate_purchase(self):
-        pass
-
-    def handle_checkout(self, test=True):
-        previous_title = self.driver.title
-        button = None
-        timeout = get_timeout()
-
-        button_xpaths = [
-            '//input[@name="placeYourOrder1"]',
-            '//*[@id="submitOrderButtonId"]/span/input',
-            '//*[@id="bottomSubmitOrderButtonId"]/span/input',
-            '//*[@id="placeYourOrder"]/span/input',
-        ]
-
-        while True:
-            try:
-                button = self.driver.find_element_by_xpath(button_xpaths[0])
-            except NoSuchElementException:
-                pass
-            button_xpaths.append(button_xpaths.pop(0))
-            if button:
-                if button.is_enabled() and button.is_displayed():
-                    break
-            if time.time() > timeout:
-                log.error("couldn't find buttons to proceed to checkout")
-                # self.save_page_source("ptc-error")
-                self.send_notification(
-                    "Error in checkout.  Please check browser window.",
-                    "ptc-error",
-                    self.take_screenshots,
-                )
-                log.info("Refreshing page to try again")
-                self.driver.refresh()
-                time.sleep(3)
-                # self.order_retry += 1
-                return
-        if test:
-            log.info(f"Found button {button.text}, but this is a test")
-            log.info("will not try to complete order")
-            # log.info(f"test time took {time.time() - self.start_time_atc} to check out")
-            # self.try_to_checkout = False
-            # self.great_success = True
-            # if self.single_shot:
-            #     self.asin_list = []
-        else:
-            log.info(f"Clicking Button {button.text} to place order")
-            with self.wait_for_page_change(timeout=10):
-                button.click()
-
-        ORDER_COMPLETE_TITLES = [
-            "Amazon.com Thanks You",
-            "Amazon.ca Thanks You",
-            "AmazonSmile Thanks You",
-            "Thank you",
-            "Amazon.fr Merci",
-            "Merci",
-            "Amazon.es te da las gracias",
-            "Amazon.fr vous remercie.",
-            "Grazie da Amazon.it",
-            "Hartelijk dank",
-            "Thank You",
-            "Amazon.de Vielen Dank",
-        ]
-
-        if self.driver.title in ORDER_COMPLETE_TITLES:
-            return True
-        else:
-            return False
+    # def navigate_purchase(self):
+    #     pass
+    #
+    # def handle_checkout(self, test=True):
+    #     previous_title = self.driver.title
+    #     button = None
+    #     timeout = get_timeout()
+    #
+    #     button_xpaths = [
+    #         '//input[@name="placeYourOrder1"]',
+    #         '//*[@id="submitOrderButtonId"]/span/input',
+    #         '//*[@id="bottomSubmitOrderButtonId"]/span/input',
+    #         '//*[@id="placeYourOrder"]/span/input',
+    #     ]
+    #
+    #     while True:
+    #         try:
+    #             button = self.driver.find_element_by_xpath(button_xpaths[0])
+    #         except NoSuchElementException:
+    #             pass
+    #         button_xpaths.append(button_xpaths.pop(0))
+    #         if button:
+    #             if button.is_enabled() and button.is_displayed():
+    #                 break
+    #         if time.time() > timeout:
+    #             log.error("couldn't find buttons to proceed to checkout")
+    #             # self.save_page_source("ptc-error")
+    #             self.send_notification(
+    #                 "Error in checkout.  Please check browser window.",
+    #                 "ptc-error",
+    #                 self.take_screenshots,
+    #             )
+    #             log.info("Refreshing page to try again")
+    #             self.driver.refresh()
+    #             time.sleep(3)
+    #             # self.order_retry += 1
+    #             return
+    #     if test:
+    #         log.info(f"Found button {button.text}, but this is a test")
+    #         log.info("will not try to complete order")
+    #         # log.info(f"test time took {time.time() - self.start_time_atc} to check out")
+    #         # self.try_to_checkout = False
+    #         # self.great_success = True
+    #         # if self.single_shot:
+    #         #     self.asin_list = []
+    #     else:
+    #         log.info(f"Clicking Button {button.text} to place order")
+    #         with self.wait_for_page_change(timeout=10):
+    #             button.click()
+    #
+    #     ORDER_COMPLETE_TITLES = [
+    #         "Amazon.com Thanks You",
+    #         "Amazon.ca Thanks You",
+    #         "AmazonSmile Thanks You",
+    #         "Thank you",
+    #         "Amazon.fr Merci",
+    #         "Merci",
+    #         "Amazon.es te da las gracias",
+    #         "Amazon.fr vous remercie.",
+    #         "Grazie da Amazon.it",
+    #         "Hartelijk dank",
+    #         "Thank You",
+    #         "Amazon.de Vielen Dank",
+    #     ]
+    #
+    #     if self.driver.title in ORDER_COMPLETE_TITLES:
+    #         return True
+    #     else:
+    #         return False
 
     def get_html(self, url):
         """Unified mechanism to get content to make changing connection clients easier"""
@@ -1019,6 +1020,7 @@ def modify_browser_profile():
 def set_options(prefs, slow_mode):
     options.add_experimental_option("prefs", prefs)
     options.add_argument(f"user-data-dir=.profile-amz")
+    YOLO = "none"
     if slow_mode:
         options.set_capability("pageLoadStrategy", "normal")
     else:
