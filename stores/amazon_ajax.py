@@ -280,7 +280,7 @@ class AmazonStoreHandler(BaseStoreHandler):
             password_field.send_keys(self.amazon_config["password"])
             # check for captcha
             try:
-                captcha_entry = self.driver.find_elements_by_xpath(
+                captcha_entry = self.driver.find_element_by_xpath(
                     '//*[@id="auth-captcha-guess"]'
                 )
             except NoSuchElementException:
