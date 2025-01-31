@@ -260,7 +260,7 @@ def amazon(
             encryption_pass=p,
             log_stock_check=log_stock_check,
             shipping_bypass=shipping_bypass,
-            alt_checkout=True,
+            alt_checkout=alt_checkout,
             wait_on_captcha_fail=captcha_wait,
         )
     else:
@@ -279,7 +279,7 @@ def amazon(
             encryption_pass=p,
             log_stock_check=log_stock_check,
             shipping_bypass=shipping_bypass,
-            alt_checkout=True,
+            alt_checkout=alt_checkout,
             wait_on_captcha_fail=captcha_wait,
         )
 
