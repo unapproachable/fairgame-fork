@@ -29,9 +29,11 @@ from signal import SIGINT, signal
 
 import click
 
+import stores
 from common.globalconfig import AMAZON_CREDENTIAL_FILE, GlobalConfig
 from notifications.notifications import NotificationHandler, TIME_FORMAT
 from stores.amazon import Amazon
+from stores.amazon_neo import AmazonNeo
 from utils.logger import log
 from utils.version import is_latest, version, get_latest_version
 
@@ -198,27 +200,34 @@ def main():
     default=False,
     help="Wait if captcha could not be solved. Only occurs if enters captcha handler during checkout.",
 )
+@click.option(
+    "--neo",
+    is_flag=True,
+    default=False,
+    help="Use the Neo-Amazon store for scanning and purchases.  Config file changes required.",
+)
 @notify_on_crash
 def amazon(
-    no_image,
-    headless,
-    test,
-    delay,
-    checkshipping,
-    detailed,
-    used,
-    single_shot,
-    no_screenshots,
-    disable_presence,
-    disable_sound,
-    slow_mode,
-    p,
-    log_stock_check,
-    shipping_bypass,
-    clean_profile,
-    clean_credentials,
-    alt_checkout,
-    captcha_wait,
+        no_image,
+        headless,
+        test,
+        delay,
+        checkshipping,
+        detailed,
+        used,
+        single_shot,
+        no_screenshots,
+        disable_presence,
+        disable_sound,
+        slow_mode,
+        p,
+        log_stock_check,
+        shipping_bypass,
+        clean_profile,
+        clean_credentials,
+        alt_checkout,
+        captcha_wait,
+        neo
 ):
     notification_handler.sound_enabled = not disable_sound
     if not notification_handler.sound_enabled:
@@ -235,24 +244,45 @@ def amazon(
     if clean_credentials and os.path.exists(AMAZON_CREDENTIAL_FILE):
         log.info(f"Removing existing Amazon credentials from {AMAZON_CREDENTIAL_FILE}")
         os.remove(AMAZON_CREDENTIAL_FILE)
+    if neo:
+        # New
+        amzn_obj = stores.amazon_neo.AmazonNeo(
+            headless=headless,
+            notification_handler=notification_handler,
+            checkshipping=checkshipping,
+            detailed=detailed,
+            used=used,
+            single_shot=single_shot,
+            no_screenshots=no_screenshots,
+            disable_presence=disable_presence,
+            slow_mode=slow_mode,
+            no_image=no_image,
+            encryption_pass=p,
+            log_stock_check=log_stock_check,
+            shipping_bypass=shipping_bypass,
+            alt_checkout=True,
+            wait_on_captcha_fail=captcha_wait,
+        )
+    else:
+        # Legacy
+        amzn_obj = stores.amazon.Amazon(
+            headless=headless,
+            notification_handler=notification_handler,
+            checkshipping=checkshipping,
+            detailed=detailed,
+            used=used,
+            single_shot=single_shot,
+            no_screenshots=no_screenshots,
+            disable_presence=disable_presence,
+            slow_mode=slow_mode,
+            no_image=no_image,
+            encryption_pass=p,
+            log_stock_check=log_stock_check,
+            shipping_bypass=shipping_bypass,
+            alt_checkout=True,
+            wait_on_captcha_fail=captcha_wait,
+        )
 
-    amzn_obj = Amazon(
-        headless=headless,
-        notification_handler=notification_handler,
-        checkshipping=checkshipping,
-        detailed=detailed,
-        used=used,
-        single_shot=single_shot,
-        no_screenshots=no_screenshots,
-        disable_presence=disable_presence,
-        slow_mode=slow_mode,
-        no_image=no_image,
-        encryption_pass=p,
-        log_stock_check=log_stock_check,
-        shipping_bypass=shipping_bypass,
-        alt_checkout=True,
-        wait_on_captcha_fail=captcha_wait,
-    )
     try:
         amzn_obj.run(delay=delay, test=test)
     except RuntimeError:
