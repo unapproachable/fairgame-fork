@@ -116,6 +116,7 @@ class AmazonNeo:
             wait_on_captcha_fail=False,
             alt_checkout=False,
     ):
+        log.info("Neo Flavor Engaged.")
         self.notification_handler = notification_handler
         self.asin_list = []
         self.reserve_min = []
@@ -181,7 +182,9 @@ class AmazonNeo:
                 try:
                     config = json.load(json_file, )
                     self.asin_groups = len(config["itemList"])
-                    # self.asin_groups = int(config["asin_groups"])
+                    if self.asin_groups <= 0:
+                        log.error("No asins nodes found to process in the itemList node.  Be sure to include the following nodes per item in the itemList: asins, min, max")
+                        exit(0)
                     self.amazon_website = config.get("amazon_website", "amazon.com")
                     for idx, item in enumerate(config["itemList"]):
                         asins = item["asins"]
@@ -198,30 +201,6 @@ class AmazonNeo:
                         self.asin_list.append(asins)
                         self.reserve_min.append(min_price)
                         self.reserve_max.append(max_price)
-                    print("Neo:")
-                    print(f"{self.asin_list =}")
-                    print(f"{self.reserve_min =}")
-                    print(f"{self.reserve_max =}")
-
-                    #
-                    # for x in range(self.asin_groups):
-                    #     if float(config[f"reserve_min_{x + 1}"]) > float(
-                    #             config[f"reserve_max_{x + 1}"]
-                    #     ):
-                    #         log.error("Minimum price must be <= maximum price")
-                    #         log.error(
-                    #             f"    {float(config[f'reserve_min_{x + 1}']):.2f} > {float(config[f'reserve_max_{x + 1}']):.2f}"
-                    #         )
-                    #         exit(0)
-                    #
-                    #     self.asin_list.append(config[f"asin_list_{x + 1}"])
-                    #     self.reserve_min.append(float(config[f"reserve_min_{x + 1}"]))
-                    #     self.reserve_max.append(float(config[f"reserve_max_{x + 1}"]))
-                    #
-                    # print("Retro:")
-                    # print(f"{self.asin_list =}")
-                    # print(f"{self.reserve_min =}")
-                    # print(f"{self.reserve_max =}")
 
                 except Exception as e:
                     log.error(f"{e} is missing")
@@ -991,7 +970,7 @@ class AmazonNeo:
                     self.end_time_atc = time.time()
                     start_time_bin = time.time()
                     log.info(
-                        f"Found button {place_order_button.text}, but this is a test"
+                        f"Found button {place_order_button.accessible_name}, but this is a test"
                     )
                     seller_elements = self.driver.find_elements(
                         By.XPATH,
