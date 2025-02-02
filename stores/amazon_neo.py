@@ -119,6 +119,7 @@ class AmazonNeo:
         log.info("Neo Flavor Engaged.")
         self.notification_handler = notification_handler
         self.asin_list = []
+        self.asin_names = {}  # Empty dictionary to cache item names
         self.reserve_min = []
         self.reserve_max = []
         self.checkshipping = checkshipping
@@ -188,7 +189,7 @@ class AmazonNeo:
                     self.amazon_website = config.get("amazon_website", "amazon.com")
                     for idx, item in enumerate(config["itemList"]):
                         asins = item["asins"]
-                        min_price = item["min"] or  0.0
+                        min_price = item["min"] or 0.0
                         max_price = item["max"] or min_price
 
                         # Sanity Check
@@ -461,10 +462,22 @@ class AmazonNeo:
                 for asin in self.asin_list[i]:
                     self.start_time_check = time.time()
                     if self.log_stock_check:
-                        log.info(f"Checking ASIN: {asin}.")
+                        log.info(f"Checking ASIN: {asin} {self.asin_names[asin][:60] if asin in self.asin_names else ''}.")
                     if self.check_stock(asin, self.reserve_min[i], self.reserve_max[i]):
                         return asin
                     # log.info(f"check time took {time.time()-start_time} seconds")
+                    if not self.asin_names.get(asin):
+                        # After checking, if we don't have a name, see if we can cache it to make
+                        # the logs easier to understand.  If nothing found, set a default so we don't look again
+                        asin_names = self.driver.find_elements(
+                            By.XPATH,
+                            "//h5[@id='aod-asin-title-text']",
+                        )
+                        asin_name = 'Title Not Found'
+                        for name in asin_names:
+                            if name.aria_role == 'heading':
+                                asin_name = name.text
+                        self.asin_names[asin] = asin_name
                     time.sleep(delay)
 
     seller_name = ""
@@ -555,10 +568,7 @@ class AmazonNeo:
                         By.XPATH,
                         "//div[@id='aod-pinned-offer' or @id='aod-offer']//input[@name='submit.addToCart']",
                     )
-                elif (
-                        offer_container.get_attribute("data-action")
-                        == "show-all-offers-display"
-                ):
+                elif (offer_container.get_attribute("data-action") == "show-all-offers-display"):
                     # PDP Page
                     # Find the offers link first, just to burn some cycles in case the flyout is loading
                     open_offers_link = None
