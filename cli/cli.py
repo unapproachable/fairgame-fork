@@ -212,7 +212,7 @@ def amazon(
         headless,
         test,
         delay,
-        checkshipping,
+        check_shipping,
         detailed,
         used,
         single_shot,
@@ -249,7 +249,7 @@ def amazon(
         amzn_obj = stores.amazon_neo.AmazonNeo(
             headless=headless,
             notification_handler=notification_handler,
-            checkshipping=checkshipping,
+            check_shipping=check_shipping,
             detailed=detailed,
             used=used,
             single_shot=single_shot,
@@ -268,7 +268,7 @@ def amazon(
         amzn_obj = stores.amazon.Amazon(
             headless=headless,
             notification_handler=notification_handler,
-            checkshipping=checkshipping,
+            checkshipping=check_shipping,
             detailed=detailed,
             used=used,
             single_shot=single_shot,

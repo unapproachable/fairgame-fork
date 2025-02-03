@@ -22,8 +22,8 @@ import json
 import math
 import os
 import platform
-import time
 import re
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum
@@ -31,22 +31,20 @@ from typing import List
 
 import psutil
 from amazoncaptcha import AmazonCaptcha
-from chromedriver_py import binary_path  # this will get you the path variable
 from furl import furl
 from lxml import html
 from price_parser import parse_price, Price
 from pypresence import exceptions as pyexceptions
 from selenium import webdriver
 from selenium.common import exceptions as sel_exceptions
+from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service as ChromeService
 
-import utils.selenium_utils
 from utils import discord_presence as presence
 from utils.debugger import debug
 from utils.logger import log
@@ -101,7 +99,7 @@ class AmazonNeo:
             self,
             notification_handler,
             headless=False,
-            checkshipping=False,
+            check_shipping=False,
             detailed=False,
             used=False,
             single_shot=False,
@@ -122,7 +120,7 @@ class AmazonNeo:
         self.asin_names = {}  # Empty dictionary to cache item names
         self.reserve_min = []
         self.reserve_max = []
-        self.checkshipping = checkshipping
+        self.check_shipping = check_shipping
         self.button_xpaths = BUTTON_XPATHS
         self.detailed = detailed
         self.used = used
@@ -184,7 +182,8 @@ class AmazonNeo:
                     config = json.load(json_file, )
                     self.asin_groups = len(config["itemList"])
                     if self.asin_groups <= 0:
-                        log.error("No asins nodes found to process in the itemList node.  Be sure to include the following nodes per item in the itemList: asins, min, max")
+                        log.error(
+                            "No asins nodes found to process in the itemList node.  Be sure to include the following nodes per item in the itemList: asins, min, max")
                         exit(0)
                     self.amazon_website = config.get("amazon_website", "amazon.com")
                     for idx, item in enumerate(config["itemList"]):
@@ -215,9 +214,6 @@ class AmazonNeo:
             )
             exit(0)
 
-        if not self.create_driver(self.profile_path):
-            exit(1)
-
         for key in AMAZON_URLS.keys():
             AMAZON_URLS[key] = AMAZON_URLS[key].format(domain=self.amazon_website)
         if self.alt_offers:
@@ -230,6 +226,10 @@ class AmazonNeo:
         self.testing = test
         self.refresh_delay = delay
         self.show_config()
+
+        log.info("Spawning web driver...")
+        if not self.create_driver(self.profile_path):
+            exit(1)
 
         log.info("Waiting for home page.")
         while True:
@@ -462,7 +462,8 @@ class AmazonNeo:
                 for asin in self.asin_list[i]:
                     self.start_time_check = time.time()
                     if self.log_stock_check:
-                        log.info(f"Checking ASIN: {asin} {self.asin_names[asin][:60] if asin in self.asin_names else ''}.")
+                        log.info(
+                            f"Checking ASIN: {asin} {self.asin_names[asin][:60] if asin in self.asin_names else ''}.")
                     if self.check_stock(asin, self.reserve_min[i], self.reserve_max[i]):
                         return asin
                     # log.info(f"check time took {time.time()-start_time} seconds")
@@ -491,6 +492,7 @@ class AmazonNeo:
         f = furl(self.ACTIVE_OFFER_URL + asin + "?aod=1&ie=UTF8&condition=ALL&th=1")
         fail_counter = 0
         presence.searching_update()
+        offer_prices = []  # Track found prices for logging
 
         # handles initial page load only
         while True:
@@ -664,11 +666,9 @@ class AmazonNeo:
 
                     return False
                 if len(offer_count) == 0:
-                    log.info("No offers found.  Moving on.")
+                    log.info("No offers found. Moving on.")
                     return False
-                log.info(
-                    f"Found {len(offer_count)} offers for {asin}.  Evaluating offers..."
-                )
+                log.info(f"Found {len(offer_count)} offers for {asin}.  Evaluating offers...")
 
             except sel_exceptions.TimeoutException as te:
                 log.warning("Timed out waiting for offers to render.  Skipping...")
@@ -760,10 +760,12 @@ class AmazonNeo:
 
         in_stock = False
 
+        offer_prices.clear()  # Reset found prices
         for idx, atc_button in enumerate(atc_buttons):
-            # If the user has specified that they only want free items, we can skip any items
+            # If the user has specified that they only want free shipping items, we can skip any items
             # that have any shipping cost and early out
-            if not self.checkshipping and shipping_prices[idx].amount_float > 0.00:
+            if not self.check_shipping and shipping_prices[idx].amount_float > 0.00:
+                log.info("Skipping non-free shipping offer.")
                 continue
 
             # Condition check first, using the button to find the form that will divulge the item's condition
@@ -808,6 +810,7 @@ class AmazonNeo:
                 return False
             if ship_float is None:
                 ship_float = 0
+            offer_prices.append(price_float + ship_float)
 
             if (
                     (
@@ -945,6 +948,8 @@ class AmazonNeo:
                 log.error(f"  Max:   {reserve_max}")
 
         log.info(f"Offers exceed price range ({reserve_min:.2f}-{reserve_max:.2f})")
+        offer_prices.sort()
+        log.info(f"\tOffers: {','.join(map(str,offer_prices))}")
         return in_stock
 
     def buy_it_now(self, offering_id, max_atc_retries=DEFAULT_MAX_ATC_TRIES):
@@ -1830,7 +1835,7 @@ class AmazonNeo:
             log.info(f"--Chrome is running in Headless mode")
         if self.used:
             log.info(f"--Used items are considered for purchase")
-        if self.checkshipping:
+        if self.check_shipping:
             log.info(f"--Shipping costs are included in price calculations")
         else:
             log.info(f"--Free Shipping items only")
