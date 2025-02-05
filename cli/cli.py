@@ -31,7 +31,7 @@ import click
 
 from common.globalconfig import AMAZON_CREDENTIAL_FILE, GlobalConfig
 from notifications.notifications import NotificationHandler, TIME_FORMAT
-from stores.amazon import Amazon
+from stores.amazon2 import Amazon
 from utils.logger import log
 from utils.version import is_latest, version, get_latest_version
 
@@ -237,9 +237,10 @@ def amazon(
         os.remove(AMAZON_CREDENTIAL_FILE)
 
     amzn_obj = Amazon(
+        global_config=global_config,
         headless=headless,
         notification_handler=notification_handler,
-        checkshipping=checkshipping,
+        check_shipping=checkshipping,
         detailed=detailed,
         used=used,
         single_shot=single_shot,
@@ -250,7 +251,7 @@ def amazon(
         encryption_pass=p,
         log_stock_check=log_stock_check,
         shipping_bypass=shipping_bypass,
-        alt_checkout=True,
+        alt_checkout=alt_checkout,
         wait_on_captcha_fail=captcha_wait,
     )
     try:
@@ -429,5 +430,6 @@ else:
         f"Consider upgrading "
     )
 
+# TODO: Abstract store configurations away from Fairgame global configuration
 global_config = GlobalConfig()
 notification_handler = NotificationHandler()

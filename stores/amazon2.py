@@ -17,40 +17,31 @@
 #      The author may be contacted through the project's GitHub, at:
 #      https://github.com/Hari-Nagarajan/fairgame
 
-import fileinput
 import json
 import math
 import os
-import platform
-import time
 import re
-from contextlib import contextmanager
+import sys
+import time
 from datetime import datetime
 from enum import Enum
 from typing import List
 
-import psutil
 from amazoncaptcha import AmazonCaptcha
-from chromedriver_py import binary_path  # this will get you the path variable
 from furl import furl
 from lxml import html
 from price_parser import parse_price, Price
-from pypresence import exceptions as pyexceptions
-from selenium import webdriver
 from selenium.common import exceptions as sel_exceptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service as ChromeService
 
-import utils.selenium_utils
-from utils import discord_presence as presence, selenium_utils
+from stores.selenium_store import SeleniumStore
+from utils import discord_presence as presence
 from utils.debugger import debug
 from utils.logger import log
-from utils.selenium_utils import options, enable_headless
 
 # Optional OFFER_URL is:     "OFFER_URL": "https://{domain}/dp/",
 AMAZON_URLS = {
@@ -59,6 +50,7 @@ AMAZON_URLS = {
     "OFFER_URL": "https://{domain}/dp/",
     "CART_URL": "https://{domain}/gp/cart/view.html",
     "ATC_URL": "https://{domain}/gp/aws/cart/add.html",
+    "BUY_IT_NOW_URL": "https://{domain}//gp/checkoutportal/enter-checkout.html?buyNow=1&skipCart=1&quantity=1&offeringID="
 }
 CHECKOUT_URL = "https://{domain}/gp/cart/desktop/go-to-checkout.html/ref=ox_sc_proceed?partialCheckoutCart=1&isToBeGiftWrappedBefore=0&proceedToRetailCheckout=Proceed+to+checkout&proceedToCheckout=1&cartInitiateId={cart_id}"
 
@@ -70,15 +62,7 @@ BUTTON_XPATHS = [
     '//*[@id="bottomSubmitOrderButtonId"]/span/input',
     '//*[@id="placeYourOrder"]/span/input',
 ]
-# old xpaths, not sure these were needed for current work flow
-# '//*[@id="orderSummaryPrimaryActionBtn"]',
-# '//input[@name="placeYourOrder1"]',
-# '//*[@id="hlb-ptc-btn-native"]',
-# '//*[@id="sc-buy-box-ptc-button"]/span/input',
-# '//*[@id="buy-now-button"]',
-# Prime popup
-# //*[@id="primeAutomaticPopoverAdContent"]/div/div/div[1]/a
-# //*[@id="primeAutomaticPopoverAdContent"]/div/div/div[1]/a
+
 FREE_SHIPPING_PRICE = parse_price("0.00")
 
 DEFAULT_MAX_CHECKOUT_LOOPS = 30
@@ -96,52 +80,68 @@ DEFAULT_MAX_URL_FAIL = 5
 amazon_config = {}
 
 
-class Amazon:
-    def __init__(
-        self,
-        notification_handler, # Base
-        headless=False, # Selenium
-        check_shipping=False,
-        detailed=False, # Base (verbosity)
-        used=False,
-        single_shot=False, # Base
-        no_screenshots=False, # Selenium
-        disable_presence=False, # Base
-        slow_mode=False,  # Selenium
-        no_image=False, # Selenium
-        encryption_pass=None, # Base
-        log_stock_check=False, # Base
-        shipping_bypass=False,
-        alt_offers=False,
-        wait_on_captcha_fail=False,
-        alt_checkout=False,
-    ):
-        self.notification_handler = notification_handler
+def get_config_dir():
+    # Get the path of the parent script
+    parent_script_path = sys.argv[0]
+
+    # Get the directory of the parent script
+    parent_script_dir = os.path.dirname(os.path.abspath(parent_script_path))
+    config_path = os.path.join(parent_script_dir, 'config', 'asin_names.json')
+    # Ensure the 'config' directory exists
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    return config_path
+
+
+def load_asin_metadata():
+    config_path = get_config_dir()
+    try:
+        # Load the configuration data from a text file in JSON format
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        print("Configuration loaded successfully.")
+
+    except FileNotFoundError:
+        print("No configuration file found. Using default settings.")
+        config = {
+            'setting1': '',
+            'setting2': '',
+        }
+
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON: {e}")
+        config = {
+            'setting1': '',
+            'setting2': '',
+        }
+    return config
+
+class Amazon(SeleniumStore):
+    def __init__(self, *args, notification_handler, headless=False, check_shipping=False, detailed=False, used=False,
+                 single_shot=False, no_screenshots=False, disable_presence=False, slow_mode=False, no_image=False,
+                 encryption_pass=None, log_stock_check=False, shipping_bypass=False, alt_offers=False,
+                 wait_on_captcha_fail=False, alt_checkout=False, **kwargs):
+
+        super().__init__(*args, notification_handler=notification_handler, detailed=detailed,
+                         no_screenshots=no_screenshots, slow_mode=slow_mode, no_image=no_image, single_shot=single_shot,
+                         disable_presence=disable_presence, log_stock_check=log_stock_check, headless=headless,
+                         **kwargs)
+        self.amazon_website = None
         self.asin_list = []
+        self.asin_names = load_asin_metadata()
         self.reserve_min = []
         self.reserve_max = []
         self.check_shipping = check_shipping
         self.button_xpaths = BUTTON_XPATHS
-        self.detailed = detailed
         self.used = used
-        if used:
-            self.condition = AmazonItemCondition.UsedAcceptable
-        else:
-            self.condition = AmazonItemCondition.New
-        self.single_shot = single_shot
-        self.take_screenshots = not no_screenshots
+
         self.start_time = time.time()
         self.start_time_check = 0
         self.start_time_atc = 0
         self.end_time_atc = 0
-        self.webdriver_child_pids = []
         self.driver = None
-        self.refresh_delay = DEFAULT_REFRESH_DELAY
-        self.testing = False
-        self.slow_mode = slow_mode
+        self.scan_delay = DEFAULT_REFRESH_DELAY
+
         self.setup_driver = True
-        self.headless = headless
-        self.no_image = no_image
         self.log_stock_check = log_stock_check
         self.shipping_bypass = shipping_bypass
         self.unknown_title_notification_sent = False
@@ -149,101 +149,59 @@ class Amazon:
         self.wait_on_captcha_fail = wait_on_captcha_fail
         self.alt_checkout = alt_checkout
 
-        presence.enabled = not disable_presence
-
+        # Load Amazon specific details from the global configuration
         global amazon_config
-        from cli.cli import global_config
+        amazon_config = self.global_config.get_amazon_config(encryption_pass)
 
-        amazon_config = global_config.get_amazon_config(encryption_pass)
-        self.profile_path = global_config.get_browser_profile_path()
+        # Parse amazon_config.json file for items to scan for
+        self.load_asin_config(AUTOBUY_CONFIG_PATH)
 
-        try:
-            presence.start_presence()
-        except Exception in pyexceptions:
-            log.error("Discord presence failed to load")
-            presence.enabled = False
-
-        # Create necessary sub-directories if they don't exist
-        if not os.path.exists("screenshots"):
-            try:
-                os.makedirs("screenshots")
-            except:
-                raise
-
-        if not os.path.exists("html_saves"):
-            try:
-                os.makedirs("html_saves")
-            except:
-                raise
-
-        if os.path.exists(AUTOBUY_CONFIG_PATH):
-            with open(AUTOBUY_CONFIG_PATH) as json_file:
-                try:
-                    config = json.load(json_file)
-                    self.asin_groups = int(config["asin_groups"])
-                    self.amazon_website = config.get("amazon_website", "amazon.com")
-                    for x in range(self.asin_groups):
-                        if float(config[f"reserve_min_{x + 1}"]) > float(
-                            config[f"reserve_max_{x + 1}"]
-                        ):
-                            log.error("Minimum price must be <= maximum price")
-                            log.error(
-                                f"    {float(config[f'reserve_min_{x + 1}']):.2f} > {float(config[f'reserve_max_{x + 1}']):.2f}"
-                            )
-                            exit(0)
-
-                        self.asin_list.append(config[f"asin_list_{x + 1}"])
-                        self.reserve_min.append(float(config[f"reserve_min_{x + 1}"]))
-                        self.reserve_max.append(float(config[f"reserve_max_{x + 1}"]))
-
-                except Exception as e:
-                    log.error(f"{e} is missing")
-                    log.error(
-                        "amazon_config.json file not formatted properly: https://github.com/Hari-Nagarajan/fairgame/wiki/Usage#json-configuration"
-                    )
-                    exit(0)
+        # Set the minimum item condition we'll support
+        # TODO: Update to per ASIN in the config?
+        if used:
+            self.condition = AmazonItemCondition.UsedAcceptable
         else:
-            log.error(
-                "No config file found, see here on how to fix this: https://github.com/Hari-Nagarajan/fairgame/wiki/Usage#json-configuration"
-            )
-            exit(0)
+            self.condition = AmazonItemCondition.New
 
-        if not self.create_driver(self.profile_path):
-            exit(1)
-
+        # Set the collections of URLs we'll use for scanning and purchasing to use
+        # the provided root domain (e.g. www.amazon.com vs www.amazon.de, etc.)
         for key in AMAZON_URLS.keys():
             AMAZON_URLS[key] = AMAZON_URLS[key].format(domain=self.amazon_website)
+
         if self.alt_offers:
-            log.info("Using alternate page for offer parsing.")
             self.ACTIVE_OFFER_URL = AMAZON_URLS["ALT_OFFER_URL"]
         else:
             self.ACTIVE_OFFER_URL = AMAZON_URLS["OFFER_URL"]
 
+
+
     def run(self, delay=DEFAULT_REFRESH_DELAY, test=False):
         self.testing = test
-        self.refresh_delay = delay
+        self.scan_delay = delay
         self.show_config()
 
-        log.info("Waiting for home page.")
-        while True:
-            try:
-                self.get_page(url=AMAZON_URLS["BASE_URL"])
-                break
-            except sel_exceptions.WebDriverException:
-                log.error(
-                    "Couldn't talk to "
-                    + AMAZON_URLS["BASE_URL"]
-                    + ", if the address is right, there might be a network outage..."
-                )
-                time.sleep(3)
-                pass
+        log.info("Spawning web browser...")
+        if not self.create_driver(self.profile_path):
+            log.error(f"Failed to start web browser using the profile '{self.profile_path}'")
+            exit(1)
+
+        log.info("Loading home page...")
+        try:
+            self.get_page(url=AMAZON_URLS["BASE_URL"])
+        except sel_exceptions.WebDriverException as e:
+            log.error(f"Failed to connect to {AMAZON_URLS['BASE_URL']} due to: {e.msg}")
+            exit(-1)
+
+
         cart_quantity = self.get_cart_count()
         if cart_quantity > 0:
             log.warning(f"Found {cart_quantity} item(s) in your cart.")
             log.info("Delete all item(s) in cart before starting bot.")
-            self.driver.get(AMAZON_URLS["CART_URL"])
-            log.info("Exiting in 30 seconds...")
-            time.sleep(30)
+            if not self.headless:
+                # Allow users who are interactive with their browser time to clear their carts
+                self.driver.get(AMAZON_URLS["CART_URL"])
+                log.info("Exiting in 30 seconds...")
+                time.sleep(30)
             return
         self.handle_startup()
         if not self.is_logged_in():
@@ -288,9 +246,9 @@ class Amazon:
                         pass
                     # if successful after running navigate pages, remove the asin_list from the list
                     if (
-                        not self.try_to_checkout
-                        and not self.single_shot
-                        and self.great_success
+                            not self.try_to_checkout
+                            and not self.single_shot
+                            and self.great_success
                     ):
                         self.remove_asin_list(asin)
                     # checkout loop limiters
@@ -455,10 +413,23 @@ class Amazon:
                 for asin in self.asin_list[i]:
                     self.start_time_check = time.time()
                     if self.log_stock_check:
-                        log.info(f"Checking ASIN: {asin}.")
+                        log.info(
+                            f"Checking ASIN: {asin} {self.asin_names[asin][:60] if asin in self.asin_names else ''}.")
                     if self.check_stock(asin, self.reserve_min[i], self.reserve_max[i]):
                         return asin
-                    # log.info(f"check time took {time.time()-start_time} seconds")
+                        # log.info(f"check time took {time.time()-start_time} seconds")
+                    if not self.asin_names.get(asin):
+                        # After checking, if we don't have a name, see if we can cache it to make
+                        # the logs easier to understand.  If nothing found, set a default so we don't look again
+                        asin_names = self.driver.find_elements(
+                            By.XPATH,
+                            "//h5[@id='aod-asin-title-text']",
+                        )
+                        asin_name = 'Title Not Found'
+                        for name in asin_names:
+                            if name.aria_role == 'heading':
+                                asin_name = name.text
+                        self.asin_names[asin] = asin_name
                     time.sleep(delay)
 
     seller_name = ""
@@ -550,8 +521,8 @@ class Amazon:
                         "//div[@id='aod-pinned-offer' or @id='aod-offer']//input[@name='submit.addToCart']",
                     )
                 elif (
-                    offer_container.get_attribute("data-action")
-                    == "show-all-offers-display"
+                        offer_container.get_attribute("data-action")
+                        == "show-all-offers-display"
                 ):
                     # PDP Page
                     # Find the offers link first, just to burn some cycles in case the flyout is loading
@@ -615,8 +586,8 @@ class Amazon:
                     else:
                         log.error("Could not open offers link")
                 elif (
-                    offer_container.get_attribute("aria-labelledby")
-                    == "submit.add-to-cart-announce"
+                        offer_container.get_attribute("aria-labelledby")
+                        == "submit.add-to-cart-announce"
                 ):
                     # sellers = self.driver.find_elements(By.XPATH,
                     #    "(//div[@id='aod-pinned-offer-additional-content']//div[@id='aod-offer-soldBy']//span)[2]/text()"
@@ -794,23 +765,23 @@ class Amazon:
                 ship_float = 0
 
             if (
-                (
-                    (ship_float + price_float) <= reserve_max
-                    or math.isclose(
+                    (
+                            (ship_float + price_float) <= reserve_max
+                            or math.isclose(
                         (price_float + ship_float), reserve_max, abs_tol=0.01
                     )
-                )
-                and (
+                    )
+                    and (
                     (ship_float + price_float) >= reserve_min
                     or math.isclose(
-                        (price_float + ship_float), reserve_min, abs_tol=0.01
-                    )
-                )
-                and (
+                (price_float + ship_float), reserve_min, abs_tol=0.01
+            )
+            )
+                    and (
                     seller_name == "Amazon Resale"
                     or seller_name == "Amazon"
                     or seller_name == "Amazon.com"
-                )
+            )
             ):
                 self.send_notification(
                     f"{asin} SoldBy {seller_name} for $ {price_float} + $ {ship_float} shipping fee",
@@ -887,8 +858,8 @@ class Amazon:
                     )
 
                     if (
-                        not emtpy_cart_elements
-                        and self.driver.title in amazon_config["SHOPPING_CART_TITLES"]
+                            not emtpy_cart_elements
+                            and self.driver.title in amazon_config["SHOPPING_CART_TITLES"]
                     ):
                         return True
                     else:
@@ -937,6 +908,7 @@ class Amazon:
         while not successful:
             # Skedaddle checkout url
             buy_it_now_url = f"https://{self.amazon_website}/gp/checkoutportal/enter-checkout.html?buyNow=1&skipCart=1&quantity=1&offeringID={offering_id}"
+            buy_it_now_url = f"{AMAZON_URLS['BUY_IT_NOW_URL']}{offering_id}"
             # buy_it_now_url = f"https://{self.amazon_website}/checkout/turbo-initiate?ref_=dp_start-bbf_1_glance_buyNow_2-1&pipelineType=turbo&weblab=RCX_CHECKOUT_TURBO_DESKTOP_NONPRIME_87784&temporaryAddToCart=1&offerListing.1={offering_id}&quantity.1=1"
             with self.wait_for_page_content_change():
                 self.driver.get(buy_it_now_url)
@@ -1004,7 +976,7 @@ class Amazon:
                             )
                         else:
                             log.info("Aliens exist, and this HTML is weird.")
-                        if sold_by == "Sold by:Amazon.com Services LLC":
+                        if sold_by in amazon_config["FIRST_PARTY_SELLERS"]:
                             place_order_button.click()
                             log.info("Bought from Amazon/ Amazon Resale")
                             self.send_notification(
@@ -1024,11 +996,11 @@ class Amazon:
                 while self.driver.title == "" and time.time() < timeout:
                     time.sleep(0.5)
                 if self.driver.title in amazon_config["ORDER_COMPLETE_TITLES"]:
-                    log.info("maybe this worked, check your orders")
+                    log.info("Detected order complete page. Check your orders")
                     self.save_screenshot("Order-Complete-Maybe")
                     successful = True
                 else:
-                    log.info("maybe this didn't work, check your orders")
+                    log.warning("Possibly purchase failure.  Order complete page not detected. Check your orders")
                     self.save_screenshot("Order-Maybe-Not-Complete")
                     successful = True
         return True
@@ -1056,7 +1028,7 @@ class Amazon:
                     log.error("No continue button found")
             if continue_btn:
                 if self.do_button_click(
-                    button=continue_btn, fail_text="Could not click continue button"
+                        button=continue_btn, fail_text="Could not click continue button"
                 ):
                     if self.get_cart_count() != 0:
                         return True
@@ -1064,7 +1036,7 @@ class Amazon:
                         log.info("Nothing added to cart, trying again")
 
             atc_attempts = atc_attempts + 1
-        self.send_notification("Maxed out on ATC, moving on")
+        self.send_notification("Maxed out on ATC, moving on", "attempt_atc")
         log.error("reached maximum ATC attempts, returning to stock check")
         return False
 
@@ -1176,10 +1148,10 @@ class Amazon:
                 pass
             if element:
                 if self.do_button_click(
-                    button=element,
-                    clicking_text="FairGame thinks it is seeing a Prime Offer, attempting to click No Thanks",
-                    fail_text="FairGame could not click No Thanks button",
-                    log_debug=True,
+                        button=element,
+                        clicking_text="FairGame thinks it is seeing a Prime Offer, attempting to click No Thanks",
+                        fail_text="FairGame could not click No Thanks button",
+                        log_debug=True,
                 ):
                     return
             # see if a use this address (or similar) button is on page (based on known xpaths). Only check if
@@ -1250,10 +1222,10 @@ class Amazon:
                     break
             if button:
                 if self.do_button_click(
-                    button=button,
-                    clicking_text="Found ptc button, attempting to click.",
-                    clicked_text="Clicked ptc button",
-                    fail_text="Could not click button",
+                        button=button,
+                        clicking_text="Found ptc button, attempting to click.",
+                        clicked_text="Clicked ptc button",
+                        fail_text="Could not click button",
                 ):
                     return
                 else:
@@ -1302,7 +1274,7 @@ class Amazon:
                 take_screenshot=self.take_screenshots,
             )
             if self.do_button_click(
-                button=element, fail_text="Could not click ship to address button"
+                    button=element, fail_text="Could not click ship to address button"
             ):
                 return True
 
@@ -1357,9 +1329,9 @@ class Amazon:
             )
         if button:
             if self.do_button_click(
-                button=button,
-                clicking_text="Attempting to click No Thanks button on Prime Signup Page",
-                fail_text="Failed to click No Thanks button on Prime Signup Page",
+                    button=button,
+                    clicking_text="Attempting to click No Thanks button on Prime Signup Page",
+                    fail_text="Failed to click No Thanks button on Prime Signup Page",
             ):
                 return
 
@@ -1379,12 +1351,12 @@ class Amazon:
             time.sleep(0.5)
 
     def do_button_click(
-        self,
-        button,
-        clicking_text="Clicking button",
-        clicked_text="Button clicked",
-        fail_text="Could not click button",
-        log_debug=False,
+            self,
+            button,
+            clicking_text="Clicking button",
+            clicked_text="Button clicked",
+            fail_text="Could not click button",
+            log_debug=False,
     ):
         try:
             with self.wait_for_page_content_change():
@@ -1595,13 +1567,16 @@ class Amazon:
         current_page = self.driver.title
         try:
             if not check_presence or self.driver.find_elements(
-                By.XPATH, '//form[contains(@action,"validateCaptcha")]'
+                    By.XPATH, '//form[contains(@action,"validateCaptcha")]'
             ):
                 try:
                     log.info("Stuck on a captcha... Lets try to solve it.")
-                    # captcha_link = self.driver.page_source.split('<img src="')[1].split('">')[0]  # extract captcha link
-                    # captcha = AmazonCaptcha.fromlink(captcha_link)
-                    captcha = AmazonCaptcha.from_webdriver(self.driver)
+                    captcha_link = self.driver.page_source.split('<img src="')[1].split(
+                        '">'
+                    )[
+                        0
+                    ]  # extract captcha link
+                    captcha = AmazonCaptcha.fromlink(captcha_link)
                     solution = captcha.solve()
                     log.info(f"The solution is: {solution}")
                     if solution == "Not solved":
@@ -1620,15 +1595,15 @@ class Amazon:
                             with self.wait_for_page_content_change():
                                 timeout = self.get_timeout(timeout=60)
                                 while (
-                                    time.time() < timeout
-                                    and self.driver.title == current_page
+                                        time.time() < timeout
+                                        and self.driver.title == current_page
                                 ):
                                     time.sleep(0.5)
                                 # check above is not true, then we must have passed captcha, return back to nav handler
                                 # Otherwise refresh page to try again - either way, returning to nav page handler
                                 if (
-                                    time.time() > timeout
-                                    and self.driver.title == current_page
+                                        time.time() > timeout
+                                        and self.driver.title == current_page
                                 ):
                                     log.info(
                                         "User intervention did not occur in time - will attempt to refresh page and try again"
@@ -1697,76 +1672,6 @@ class Amazon:
             )
             time.sleep(300)
 
-    def save_screenshot(self, page):
-        file_name = get_timestamp_filename("screenshots/screenshot-" + page, ".png")
-        try:
-            self.driver.save_screenshot(file_name)
-            return file_name
-        except sel_exceptions.TimeoutException:
-            log.info("Timed out taking screenshot, trying to continue anyway")
-            pass
-        except Exception as e:
-            log.error(f"Trying to recover from error: {e}")
-            pass
-        return None
-
-    def save_page_source(self, page):
-        """Saves DOM at the current state when called.  This includes state changes from DOM manipulation via JS"""
-        file_name = get_timestamp_filename("html_saves/" + page + "_source", "html")
-
-        page_source = self.driver.page_source
-        with open(file_name, "w", encoding="utf-8") as f:
-            f.write(page_source)
-
-    @contextmanager
-    def wait_for_page_content_change(self, timeout=5):
-        """Utility to help manage selenium waiting for a page to load after an action, like a click"""
-        old_page = self.driver.find_element(By.TAG_NAME, "html")
-        yield
-        try:
-            WebDriverWait(self.driver, timeout).until(EC.staleness_of(old_page))
-            WebDriverWait(self.driver, timeout).until(
-                EC.presence_of_element_located((By.XPATH, "//title"))
-            )
-        except sel_exceptions.TimeoutException:
-            log.info("Timed out reloading page, trying to continue anyway")
-            pass
-        except Exception as e:
-            log.error(f"Trying to recover from error: {e}")
-            pass
-        return None
-
-    def wait_for_page_change(self, page_title, timeout=3):
-        time_to_end = self.get_timeout(timeout=timeout)
-        while time.time() < time_to_end and (
-            self.driver.title == page_title or not self.driver.title
-        ):
-            pass
-        if self.driver.title != page_title:
-            return True
-        else:
-            return False
-
-    def page_wait_delay(self):
-        return DEFAULT_PAGE_WAIT_DELAY
-
-    def send_notification(self, message, page_name, take_screenshot=True):
-        if take_screenshot:
-            file_name = self.save_screenshot(page_name)
-            self.notification_handler.send_notification(message, file_name)
-        else:
-            self.notification_handler.send_notification(message)
-
-    def get_timeout(self, timeout=DEFAULT_MAX_TIMEOUT):
-        return time.time() + timeout
-
-    def get_webdriver_pids(self):
-        pid = self.driver.service.process.pid
-        driver_process = psutil.Process(pid)
-        children = driver_process.children(recursive=True)
-        for child in children:
-            self.webdriver_child_pids.append(child.pid)
-
     def get_page(self, url):
         check_cart_element = None
         current_page = []
@@ -1798,15 +1703,30 @@ class Amazon:
             return False
 
     def __del__(self):
+        self.save_asin_metadata()
+
         self.delete_driver()
 
+    def save_asin_metadata(self):
+        config_path = get_config_dir()
+
+        try:
+            # Save the configuration data to a text file in JSON format
+            with open(config_path, 'w') as f:
+                json.dump(self.asin_names, f)
+            log.info("ASIN Metadata saved successfully.")
+        except IOError as e:
+            print(f"Error saving ASIN Metadata: {e}")
+
     def show_config(self):
+        super().show_config()
+
         log.info(f"{'=' * 50}")
         log.info(
             f"Starting Amazon ASIN Hunt on {AMAZON_URLS['BASE_URL']} for {len(self.asin_list)} Products with:"
         )
         log.info(f"--Offer URL of: {self.ACTIVE_OFFER_URL}")
-        log.info(f"--Delay of {self.refresh_delay} seconds")
+        log.info(f"--Delay of {self.scan_delay} seconds")
         if self.headless:
             log.info(f"--Chrome is running in Headless mode")
         if self.used:
@@ -1826,7 +1746,7 @@ class Amazon:
         if self.log_stock_check:
             log.info(f"--Additional stock check logging enabled")
         if self.slow_mode:
-            log.warning(f"--Slow-mode enabled. Pages will fully load before execution.")
+            log.info(f"--Slow-mode enabled. Pages will fully load before execution.")
         if self.shipping_bypass:
             log.warning(f"{'=' * 50}")
             log.warning(f"--FairGame will attempt to choose shipping address.")
@@ -1840,10 +1760,15 @@ class Amazon:
             )
             log.warning(f"{'=' * 50}")
         for idx, asins in enumerate(self.asin_list):
-            log.info(
-                f"--Looking for {len(asins)} ASINs between {self.reserve_min[idx]:.2f} and {self.reserve_max[idx]:.2f}"
-            )
-            log.info(f"-    {asins}")
+            if len(asins) == 1:
+                log.info(
+                    f"--Looking for ASIN {asins} between {self.reserve_min[idx]:.2f} and {self.reserve_max[idx]:.2f}"
+                )
+            else:
+                log.info(
+                    f"--Looking for {len(asins)} ASINs between {self.reserve_min[idx]:.2f} and {self.reserve_max[idx]:.2f}"
+                )
+                log.info(f"-    {asins}")
         if not presence.enabled:
             log.info(f"--Discord Presence feature is disabled.")
         if self.no_image:
@@ -1856,84 +1781,44 @@ class Amazon:
             log.warning(f"--Testing Mode.  NO Purchases will be made.")
         log.info(f"{'=' * 50}")
 
-    def create_driver(self, path_to_profile):
-        if self.setup_driver:
+    def load_asin_config(self, amazon_config_path):
+        if os.path.exists(amazon_config_path):
+            with open(amazon_config_path) as json_file:
+                try:
+                    config = json.load(json_file, )
+                    asin_groups = len(config["itemList"])
+                    if asin_groups <= 0:
+                        log.error(
+                            "No asins nodes found to process in the itemList node.  Be sure to include the following nodes per item in the itemList: asins, min, max")
+                        exit(0)
+                    self.amazon_website = config.get("amazon_website", "amazon.com")
+                    for idx, item in enumerate(config["itemList"]):
+                        asins = item["asins"]
+                        min_price = item["min"] or 0.0
+                        max_price = item["max"] or min_price
 
-            options = selenium_utils.get_driver_options()
+                        # Sanity Check
+                        if min_price > max_price:
+                            log.error("Minimum price must be <= maximum price")
+                            log.error(
+                                f"    {min_price:.2f} > {max_price:.2f}"
+                            )
+                            exit(0)
+                        self.asin_list.append(asins)
+                        self.reserve_min.append(min_price)
+                        self.reserve_max.append(max_price)
 
-            if self.headless:
-                enable_headless(options)
-
-            prefs = {
-                "profile.password_manager_enabled": False,
-                "credentials_enable_service": False,
-            }
-            if self.no_image:
-                prefs["profile.managed_default_content_settings.images"] = 2
-            else:
-                prefs["profile.managed_default_content_settings.images"] = 0
-            options.add_experimental_option("prefs", prefs)
-            options.add_argument(f"user-data-dir={path_to_profile}")
-            if not self.slow_mode:
-                options.set_capability("pageLoadStrategy", "none")
-
-            self.setup_driver = False
-
-        # Delete crashed, so restore pop-up doesn't happen
-        path_to_prefs = os.path.join(
-            path_to_profile,
-            "Default",
-            "Preferences",
-        )
-        try:
-            with fileinput.FileInput(path_to_prefs, inplace=True) as file:
-                for line in file:
-                    print(line.replace("Crashed", "none"), end="")
-        except FileNotFoundError:
-            pass
-        try:
-            self.driver = webdriver.Chrome(
-                options=options, service=ChromeService(ChromeDriverManager().install())
-            )
-            self.wait = WebDriverWait(self.driver, 10)
-            self.get_webdriver_pids()
-        except Exception as e:
-            log.error(e)
+                except Exception as e:
+                    log.error(f"{e} is missing")
+                    log.error(
+                        "amazon_config.json file not formatted properly: https://github.com/Hari-Nagarajan/fairgame/wiki/Usage#json-configuration"
+                    )
+                    exit(0)
+        else:
             log.error(
-                "If you have a JSON warning above, try cleaning your profile (e.g. --clean-profile)"
+                "No config file found, see here on how to fix this: https://github.com/Hari-Nagarajan/fairgame/wiki/Usage#json-configuration"
             )
-            log.error(
-                "If that's not it, you probably have a previous Chrome window open. You should close it."
-            )
-
-            return False
-
-        return True
-
-    def delete_driver(self):
-        try:
-            if platform.system() == "Windows" and self.driver:
-                log.info("Cleaning up after web driver...")
-                # brute force kill child Chrome pids with fire
-                for pid in self.webdriver_child_pids:
-                    try:
-                        log.debug(f"Killing {pid}...")
-                        process = psutil.Process(pid)
-                        process.kill()
-                    except psutil.NoSuchProcess:
-                        log.debug(f"{pid} not found. Continuing...")
-                        pass
-            elif self.driver:
-                self.driver.quit()
-
-        except Exception as e:
-            log.info(e)
-            log.info(
-                "Failed to clean up after web driver.  Please manually close browser."
-            )
-            return False
-        return True
-
+            exit(0)
 
 def get_timestamp_filename(name, extension):
     """Utility method to create a filename with a timestamp appended to the root and before
@@ -1959,8 +1844,8 @@ def get_shipping_costs(tree, free_shipping_string):
         if shipping_node.text:
             shipping_span_text = shipping_node.text.strip()
             if any(
-                shipping_span_text.upper() in free_message
-                for free_message in amazon_config["FREE_SHIPPING"]
+                    shipping_span_text.upper() in free_message
+                    for free_message in amazon_config["FREE_SHIPPING"]
             ):
                 # We found some version of "free" inside the span.. but this relies on a match
                 log.debug(
@@ -2075,8 +1960,8 @@ def get_alt_shipping_costs(tree, free_shipping_string) -> Price:
             if "FREE" in shipping_is[0].attrib["aria-label"].upper():
                 log.debug("Found Free shipping with Prime")
         elif any(
-            shipping_span_text.upper() in free_message
-            for free_message in amazon_config["FREE_SHIPPING"]
+                shipping_span_text.upper() in free_message
+                for free_message in amazon_config["FREE_SHIPPING"]
         ):
             # We found some version of "free" inside the span.. but this relies on a match
             log.warning(
@@ -2087,6 +1972,21 @@ def get_alt_shipping_costs(tree, free_shipping_string) -> Price:
                 f"Unable to locate price.  Assuming 0.  Found this: '{shipping_span_text}'  Consider reporting to #tech-support Discord."
             )
     return FREE_SHIPPING_PRICE
+
+
+
+
+
+def wait_for_element_by_xpath(d, xpath, timeout=10):
+    try:
+        WebDriverWait(d, timeout).until(
+            EC.presence_of_element_located((By.XPATH, xpath))
+        )
+    except sel_exceptions.TimeoutException:
+        log.error(f"failed to find {xpath}")
+        return False
+
+    return True
 
 
 class AmazonItemCondition(Enum):
@@ -2137,18 +2037,6 @@ def get_item_condition(form_action) -> AmazonItemCondition:
     else:
         # log.debug(f"Item condition is unknown: {form_action}")
         return AmazonItemCondition.Unknown
-
-
-def wait_for_element_by_xpath(d, xpath, timeout=10):
-    try:
-        WebDriverWait(d, timeout).until(
-            EC.presence_of_element_located((By.XPATH, xpath))
-        )
-    except sel_exceptions.TimeoutException:
-        log.error(f"failed to find {xpath}")
-        return False
-
-    return True
 
 
 def join_xpaths(xpath_list, separator=" | "):
