@@ -961,7 +961,7 @@ class AmazonNeo:
             # buy_it_now_url = f"https://{self.amazon_website}/checkout/turbo-initiate?ref_=dp_start-bbf_1_glance_buyNow_2-1&pipelineType=turbo&weblab=RCX_CHECKOUT_TURBO_DESKTOP_NONPRIME_87784&temporaryAddToCart=1&offerListing.1={offering_id}&quantity.1=1"
             with self.wait_for_page_content_change():
                 self.driver.get(buy_it_now_url)
-                self.send_notification(f"{buy_it_now_url}", "unknown")
+                self.send_notification(f"{buy_it_now_url}", "unknown", take_screenshot=False)
             timeout = self.get_timeout(5)
             while self.driver.title == "" and time.time() < timeout:
                 time.sleep(0.5)
@@ -1025,7 +1025,7 @@ class AmazonNeo:
                             )
                         else:
                             log.info("Aliens exist, and this HTML is weird.")
-                        if sold_by == "Sold by:Amazon.com Services LLC":
+                        if sold_by == "Sold by:Amazon.com Services, Inc":
                             place_order_button.click()
                             log.info("Bought from Amazon/ Amazon Resale")
                             self.send_notification(

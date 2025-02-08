@@ -121,7 +121,7 @@ def main():
     "--delay", type=float, default=3.0, help="Time to wait between checks for item[s]"
 )
 @click.option(
-    "--checkshipping",
+    "--check-shipping",
     is_flag=True,
     help="Factor shipping costs into reserve price and look for items with a shipping price",
 )
