@@ -16,12 +16,15 @@
 #
 #      The author may be contacted through the project's GitHub, at:
 #      https://github.com/Hari-Nagarajan/fairgame
-
-import coloredlogs
 import logging
 import os
-from utils.version import version
+import sys
+import threading
 from logging import handlers
+
+import coloredlogs
+
+from utils.version import version
 
 FORMAT = "%(asctime)s|{}|%(levelname)s|%(message)s".format(version)
 

@@ -1,6 +1,7 @@
 import platform
 import time
 from contextlib import contextmanager
+from datetime import datetime
 
 import psutil
 from selenium import webdriver
@@ -13,14 +14,22 @@ from selenium.webdriver.support.wait import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 from notifications.notifications import NotificationHandler
-from stores.amazon2 import get_timestamp_filename, DEFAULT_PAGE_WAIT_DELAY, DEFAULT_MAX_TIMEOUT
 from stores.base_store import BaseStore
 from utils import selenium_utils
 from utils.logger import log
 
+DEFAULT_PAGE_WAIT_DELAY = 0.5  # also serves as minimum wait for randomized delays
+DEFAULT_MAX_PAGE_WAIT_DELAY = 1.0  # used for random page wait delay
+DEFAULT_MAX_TIMEOUT = 10
 
 # noinspection DuplicatedCode
+def get_timeout(timeout=DEFAULT_MAX_TIMEOUT):
+    return time.time() + timeout
+
+
 class SeleniumStore(BaseStore):
+
+
     def __init__(self, *args, notification_handler: NotificationHandler, detailed: bool, no_screenshots: bool,
                  slow_mode: bool, no_image: bool, single_shot: bool, disable_presence: bool, log_stock_check: bool,
                  headless: bool = False, **kwargs):
@@ -157,7 +166,7 @@ class SeleniumStore(BaseStore):
         return None
 
     def wait_for_page_change(self, page_title, timeout=3):
-        time_to_end = self.get_timeout(timeout=timeout)
+        time_to_end = get_timeout(timeout=timeout)
         while time.time() < time_to_end and (
                 self.driver.title == page_title or not self.driver.title
         ):
@@ -170,12 +179,33 @@ class SeleniumStore(BaseStore):
     def page_wait_delay(self):
         return DEFAULT_PAGE_WAIT_DELAY
 
-    def get_timeout(self, timeout=DEFAULT_MAX_TIMEOUT):
-        return time.time() + timeout
-
     def send_notification(self, message, page_name, take_screenshot=True):
         if take_screenshot:
             file_name = self.save_screenshot(page_name)
             self.notification_handler.send_notification(message, file_name)
         else:
             self.notification_handler.send_notification(message)
+
+def wait_for_element_by_xpath(d, xpath, timeout=10):
+    try:
+        WebDriverWait(d, timeout).until(
+            EC.presence_of_element_located((By.XPATH, xpath))
+        )
+    except sel_exceptions.TimeoutException:
+        log.error(f"failed to find {xpath}")
+        return False
+
+    return True
+
+def get_timestamp_filename(name, extension):
+    """Utility method to create a filename with a timestamp appended to the root and before
+    the provided file extension"""
+    now = datetime.now()
+    date = now.strftime("%m-%d-%Y_%H_%M_%S")
+    if extension.startswith("."):
+        return name + "_" + date + extension
+    else:
+        return name + "_" + date + "." + extension
+
+def join_xpaths(xpath_list, separator=" | "):
+    return separator.join(xpath_list)

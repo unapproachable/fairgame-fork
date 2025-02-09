@@ -23,12 +23,11 @@ import os
 import re
 import sys
 import time
-from datetime import datetime
-from enum import Enum
 from typing import List
 
 from amazoncaptcha import AmazonCaptcha
 from furl import furl
+from halo import Halo
 from lxml import html
 from price_parser import parse_price, Price
 from selenium.common import exceptions as sel_exceptions
@@ -37,8 +36,11 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from twilio.jwt.access_token.grants import deprecated
 
-from stores.selenium_store import SeleniumStore
+from common.amazon_item_condition import AmazonItemCondition, get_item_condition
+from stores.selenium_store import SeleniumStore, wait_for_element_by_xpath, DEFAULT_MAX_TIMEOUT, \
+    DEFAULT_PAGE_WAIT_DELAY, get_timeout, join_xpaths
 from utils import discord_presence as presence
 from utils.debugger import debug
 from utils.logger import log
@@ -70,11 +72,10 @@ DEFAULT_MAX_PTC_TRIES = 3
 DEFAULT_MAX_PYO_TRIES = 3
 DEFAULT_MAX_ATC_TRIES = 10
 DEFAULT_MAX_WEIRD_PAGE_DELAY = 5
-DEFAULT_PAGE_WAIT_DELAY = 0.5  # also serves as minimum wait for randomized delays
-DEFAULT_MAX_PAGE_WAIT_DELAY = 1.0  # used for random page wait delay
+
 MAX_CHECKOUT_BUTTON_WAIT = 3  # integers only
 DEFAULT_REFRESH_DELAY = 3
-DEFAULT_MAX_TIMEOUT = 10
+
 DEFAULT_MAX_URL_FAIL = 5
 
 amazon_config = {}
@@ -91,29 +92,6 @@ def get_config_dir():
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     return config_path
 
-
-def load_asin_metadata():
-    config_path = get_config_dir()
-    try:
-        # Load the configuration data from a text file in JSON format
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        print("Configuration loaded successfully.")
-
-    except FileNotFoundError:
-        print("No configuration file found. Using default settings.")
-        config = {
-            'setting1': '',
-            'setting2': '',
-        }
-
-    except json.JSONDecodeError as e:
-        print(f"Error decoding JSON: {e}")
-        config = {
-            'setting1': '',
-            'setting2': '',
-        }
-    return config
 
 class Amazon(SeleniumStore):
     def __init__(self, *args, notification_handler, headless=False, check_shipping=False, detailed=False, used=False,
@@ -173,8 +151,6 @@ class Amazon(SeleniumStore):
         else:
             self.ACTIVE_OFFER_URL = AMAZON_URLS["OFFER_URL"]
 
-
-
     def run(self, delay=DEFAULT_REFRESH_DELAY, test=False):
         self.testing = test
         self.scan_delay = delay
@@ -192,31 +168,22 @@ class Amazon(SeleniumStore):
             log.error(f"Failed to connect to {AMAZON_URLS['BASE_URL']} due to: {e.msg}")
             exit(-1)
 
-
-        cart_quantity = self.get_cart_count()
-        if cart_quantity > 0:
-            log.warning(f"Found {cart_quantity} item(s) in your cart.")
-            log.info("Delete all item(s) in cart before starting bot.")
-            if not self.headless:
-                # Allow users who are interactive with their browser time to clear their carts
-                self.driver.get(AMAZON_URLS["CART_URL"])
-                log.info("Exiting in 30 seconds...")
-                time.sleep(30)
-            return
         self.handle_startup()
+        if self.is_captcha_page():
+            log.warning("Encountered CAPTCHA test... solving")
+            self.handle_captcha(False)
+
         if not self.is_logged_in():
             self.login()
+
+        if not self.verify_empty_cart():
+            log.error("Cart still contains items.  Exiting...")
+            return
+
         self.notification_handler.play_notify_sound()
         self.send_notification(
             "Bot Logged in and Starting up", "Start-Up", self.take_screenshots
         )
-        if self.get_cart_count() > 0:
-            log.warning(f"Found {cart_quantity} item(s) in your cart.")
-            log.info("Delete all item(s) in cart before starting bot.")
-            self.driver.get(AMAZON_URLS["CART_URL"])
-            log.info("Exiting in 30 seconds...")
-            time.sleep(30)
-            return
 
         continue_stock_check = True
 
@@ -269,6 +236,24 @@ class Amazon(SeleniumStore):
         log.info(f"FairGame bot ran for {runtime} seconds.")
         time.sleep(10)  # add a delay to shut stuff done
 
+    def verify_empty_cart(self):
+        cart_quantity = self.get_cart_count()
+        if cart_quantity > 0:
+            log.warning(f"Found {cart_quantity} item(s) in your cart.")
+            log.info("Remove all item(s) in cart before starting bot to avoid inadvertent purchases.")
+            if not self.headless:
+                # Allow users who are interactive with their browser time to clear their carts
+                self.driver.get(AMAZON_URLS["CART_URL"])
+                end_time = time.time() + 20
+                with Halo(text='Waiting', spinner='dots'):
+                    log.info("Clean up your cart... you have 20 seconds.")
+                    while time.time() < end_time and self.get_cart_count() != 0:
+                        time.sleep(1)
+            else:
+                log.error(
+                    "Headless mode does not allow you to edit your cart.  Please clear items manually or remove the headless option to manage your cart.")
+        return self.get_cart_count() == 0
+
     def fail_to_checkout_note(self):
         log.info(
             "It's likely that the product went out of stock before FairGame could checkout."
@@ -285,7 +270,7 @@ class Amazon(SeleniumStore):
         if self.is_logged_in():
             log.info("Already logged in")
         else:
-            log.info("Lets log in.")
+            log.info("Let's log in.")
 
             is_smile = "smile" in AMAZON_URLS["BASE_URL"]
             xpath = (
@@ -310,12 +295,18 @@ class Amazon(SeleniumStore):
 
             return False
 
+    def is_captcha_page(self):
+        captcha_entry = self.driver.find_elements(
+            By.XPATH, '//form[contains(@action,"validateCaptcha")]'
+        )
+        return len(captcha_entry)
+
     @debug
     def login(self):
         log.info("Email")
         email_field = None
         password_field = None
-        timeout = self.get_timeout()
+        timeout = get_timeout()
         while True:
             try:
                 email_field = self.driver.find_element(By.XPATH, '//*[@id="ap_email"]')
@@ -361,15 +352,9 @@ class Amazon(SeleniumStore):
 
         time.sleep(self.page_wait_delay())
 
-        log.info("Remember me checkbox")
-        try:
-            self.driver.find_element(By.XPATH, '//*[@name="rememberMe"]').click()
-        except sel_exceptions.NoSuchElementException:
-            log.error("Remember me checkbox did not exist")
-
         log.info("Password")
         password_field = None
-        timeout = self.get_timeout()
+        timeout = get_timeout()
         current_page = self.driver.title
         while True:
             try:
@@ -403,6 +388,13 @@ class Amazon(SeleniumStore):
             while self.driver.title in amazon_config["TWOFA_TITLES"]:
                 # Wait for the user to enter 2FA
                 time.sleep(2)
+        try:
+            if self.driver.find_element(By.ID, 'ap-account-fixup-phone-skip-link'):
+                log.debug("Found 'Add Mobile Number' page.  Selecting 'Not Now'")
+                self.driver.find_element(By.ID, 'ap-account-fixup-phone-skip-link').click()
+        except sel_exceptions.NoSuchElementException:
+            # This is the expected case when we aren't prompted for a phone number
+            pass
         log.info(f'Logged in as {amazon_config["username"]}')
 
     @debug
@@ -414,7 +406,7 @@ class Amazon(SeleniumStore):
                     self.start_time_check = time.time()
                     if self.log_stock_check:
                         log.info(
-                            f"Checking ASIN: {asin} {self.asin_names[asin][:60] if asin in self.asin_names else ''}.")
+                            f"Checking ASIN: {asin} @ {self.reserve_max[i]} {self.asin_names[asin][:60] if asin in self.asin_names else ''}.")
                     if self.check_stock(asin, self.reserve_min[i], self.reserve_max[i]):
                         return asin
                         # log.info(f"check time took {time.time()-start_time} seconds")
@@ -440,7 +432,7 @@ class Amazon(SeleniumStore):
             log.info("max add to cart retries hit, returning to asin check")
             return False
         # load page
-        f = furl(self.ACTIVE_OFFER_URL + asin + "?aod=1&ie=UTF8&condition=ALL&th=1")
+        f = furl(self.ACTIVE_OFFER_URL + asin + "?aod=1&ie=UTF8&condition=ALL&th=1&psc=1")
         fail_counter = 0
         presence.searching_update()
 
@@ -448,8 +440,6 @@ class Amazon(SeleniumStore):
         while True:
             try:
                 self.get_page(f.url)
-                # log.debug(f"Initial page title {self.driver.title}")
-                # log.debug(f"        page url: {self.driver.current_url}")
                 if self.driver.title in amazon_config["CAPTCHA_PAGE_TITLES"]:
                     self.handle_captcha()
                 break
@@ -490,7 +480,7 @@ class Amazon(SeleniumStore):
                         )
                         return False
 
-        timeout = self.get_timeout()
+        timeout = get_timeout()
         atc_buttons = None
         while True:
             buy_box = False
@@ -660,7 +650,7 @@ class Amazon(SeleniumStore):
                 log.warning(f"Failed to load page for {asin}, going to next ASIN")
                 return False
 
-        timeout = self.get_timeout()
+        timeout = get_timeout()
         while True:
             if buy_box:
                 prices = self.driver.find_elements(
@@ -689,7 +679,7 @@ class Amazon(SeleniumStore):
             )
         ]
 
-        timeout = self.get_timeout()
+        timeout = get_timeout()
 
         while True:
             # Check for offers"
@@ -784,7 +774,7 @@ class Amazon(SeleniumStore):
             )
             ):
                 self.send_notification(
-                    f"{asin} SoldBy {seller_name} for $ {price_float} + $ {ship_float} shipping fee",
+                    f"{self.asin_names[asin] if asin in self.asin_names else asin} SoldBy {seller_name} for $ {price_float} + $ {ship_float} shipping fee",
                     "unknown",
                     self.take_screenshots,
                 )
@@ -913,7 +903,7 @@ class Amazon(SeleniumStore):
             with self.wait_for_page_content_change():
                 self.driver.get(buy_it_now_url)
                 self.send_notification(f"{buy_it_now_url}", "unknown")
-            timeout = self.get_timeout(5)
+            timeout = get_timeout(5)
             while self.driver.title == "" and time.time() < timeout:
                 time.sleep(0.5)
             if self.driver.title not in amazon_config["CHECKOUT_TITLES"]:
@@ -992,7 +982,7 @@ class Amazon(SeleniumStore):
                     if retry > max_atc_retries:
                         return False
                     continue
-                timeout = self.get_timeout(5)
+                timeout = get_timeout(5)
                 while self.driver.title == "" and time.time() < timeout:
                     time.sleep(0.5)
                 if self.driver.title in amazon_config["ORDER_COMPLETE_TITLES"]:
@@ -1061,7 +1051,7 @@ class Amazon(SeleniumStore):
             log.debug(
                 f"Title was blank, checking to find a real title for {timeout_seconds} seconds"
             )
-            timeout = self.get_timeout(timeout=timeout_seconds)
+            timeout = get_timeout(timeout=timeout_seconds)
             while time.time() <= timeout:
                 if self.driver.title != "":
                     title = self.driver.title
@@ -1210,7 +1200,7 @@ class Amazon(SeleniumStore):
                 return
 
             log.info("trying to click proceed to checkout")
-            timeout = self.get_timeout()
+            timeout = get_timeout()
             while True:
                 try:
                     button = self.get_amazon_element(key="PTC")
@@ -1341,7 +1331,7 @@ class Amazon(SeleniumStore):
         self.notification_handler.send_notification(
             "Prime offer page popped up, user intervention required"
         )
-        timeout = self.get_timeout(timeout=60)
+        timeout = get_timeout(timeout=60)
         while self.driver.title in amazon_config["PRIME_TITLES"]:
             if time.time() > timeout:
                 log.info("user did not intervene in time, will try and refresh page")
@@ -1401,7 +1391,7 @@ class Amazon(SeleniumStore):
             "home-page-error",
             self.take_screenshots,
         )
-        timeout = self.get_timeout(timeout=300)
+        timeout = get_timeout(timeout=300)
         while self.driver.title == current_page:
             time.sleep(0.25)
             if time.time() > timeout:
@@ -1417,7 +1407,7 @@ class Amazon(SeleniumStore):
             self.save_screenshot("ptc-page")
         except:
             pass
-        timeout = self.get_timeout()
+        timeout = get_timeout()
         button = None
         while True:
             try:
@@ -1478,7 +1468,7 @@ class Amazon(SeleniumStore):
     def handle_checkout(self, test):
         previous_title = self.driver.title
         button = None
-        timeout = self.get_timeout()
+        timeout = get_timeout()
         while True:
             try:
                 button = self.driver.find_element(By.XPATH, self.button_xpaths[0])
@@ -1531,12 +1521,8 @@ class Amazon(SeleniumStore):
     def handle_order_complete(self):
         self.end_time_atc = time.time()
         log.info("Order Placed.")
-        log.info(
-            f"  From cart: took {self.end_time_atc - self.start_time_atc} to check out"
-        )
-        log.info(
-            f"  From check: took {self.end_time_atc - self.start_time_check} to check out"
-        )
+        log.info(f"  From cart: took {self.end_time_atc - self.start_time_atc} to check out")
+        log.info(f"  From check: took {self.end_time_atc - self.start_time_check} to check out")
         self.send_notification("Order placed.", "order-placed", self.take_screenshots)
         self.notification_handler.play_purchase_sound()
         self.great_success = True
@@ -1571,12 +1557,7 @@ class Amazon(SeleniumStore):
             ):
                 try:
                     log.info("Stuck on a captcha... Lets try to solve it.")
-                    captcha_link = self.driver.page_source.split('<img src="')[1].split(
-                        '">'
-                    )[
-                        0
-                    ]  # extract captcha link
-                    captcha = AmazonCaptcha.fromlink(captcha_link)
+                    captcha = AmazonCaptcha.from_webdriver(self.driver)
                     solution = captcha.solve()
                     log.info(f"The solution is: {solution}")
                     if solution == "Not solved":
@@ -1587,13 +1568,13 @@ class Amazon(SeleniumStore):
                             log.info(
                                 "Will wait up to 60 seconds for user to solve captcha"
                             )
-                            self.send(
+                            self.send_notification(
                                 "User Intervention Required - captcha check",
                                 "captcha",
                                 self.take_screenshots,
                             )
                             with self.wait_for_page_content_change():
-                                timeout = self.get_timeout(timeout=60)
+                                timeout = get_timeout(timeout=60)
                                 while (
                                         time.time() < timeout
                                         and self.driver.title == current_page
@@ -1648,7 +1629,7 @@ class Amazon(SeleniumStore):
     def handle_business_po(self):
         log.info("On Business PO Page, Trying to move on to checkout")
         button = None
-        timeout = self.get_timeout()
+        timeout = get_timeout()
         while True:
             try:
                 button = self.driver.find_element(
@@ -1673,12 +1654,20 @@ class Amazon(SeleniumStore):
             time.sleep(300)
 
     def get_page(self, url):
+        try:
+            self.driver.get(url)
+        except sel_exceptions.WebDriverException or sel_exceptions.TimeoutException:
+            log.error(f"Failed to load page at url: {url}")
+            return False
+        return True
+
+    @deprecated
+    def get_page_orig(self, url):
+        ###Loads the specified URL and ???  Do we still need all this extra?
         check_cart_element = None
         current_page = []
         try:
-            check_cart_element = self.driver.find_element(
-                By.XPATH, '//*[@id="nav-cart"]'
-            )
+            check_cart_element = self.driver.find_element(By.XPATH, '//*[@id="nav-cart"]')
         except sel_exceptions.NoSuchElementException:
             current_page = self.driver.title
         try:
@@ -1687,7 +1676,7 @@ class Amazon(SeleniumStore):
             log.error(f"Failed to load page at url: {url}")
             return False
         if check_cart_element:
-            timeout = self.get_timeout()
+            timeout = get_timeout()
             while True:
                 try:
                     check_cart_element.is_displayed()
@@ -1703,22 +1692,11 @@ class Amazon(SeleniumStore):
             return False
 
     def __del__(self):
-        self.save_asin_metadata()
-
+        save_asin_metadata(self.asin_names)
         self.delete_driver()
 
-    def save_asin_metadata(self):
-        config_path = get_config_dir()
-
-        try:
-            # Save the configuration data to a text file in JSON format
-            with open(config_path, 'w') as f:
-                json.dump(self.asin_names, f)
-            log.info("ASIN Metadata saved successfully.")
-        except IOError as e:
-            print(f"Error saving ASIN Metadata: {e}")
-
     def show_config(self):
+        ###Prints the running configuration of the script, including configuration and command line settings"""
         super().show_config()
 
         log.info(f"{'=' * 50}")
@@ -1782,16 +1760,23 @@ class Amazon(SeleniumStore):
         log.info(f"{'=' * 50}")
 
     def load_asin_config(self, amazon_config_path):
+        """Mechanism to load and parse the asin, max, and min prices found in the itemList node of the specified JSON file
+
+        Supported Nodes:
+            itemList: consists of asin, min, and max prices)
+            amazon_website: the root domain you want ot scan (e.g. www.amazon.com, www.amazon.de, etc.)
+
+        """
         if os.path.exists(amazon_config_path):
             with open(amazon_config_path) as json_file:
                 try:
                     config = json.load(json_file, )
-                    asin_groups = len(config["itemList"])
-                    if asin_groups <= 0:
+                    self.amazon_website = config.get("amazon_website", "amazon.com")
+
+                    if len(config["itemList"]) <= 0:
                         log.error(
                             "No asins nodes found to process in the itemList node.  Be sure to include the following nodes per item in the itemList: asins, min, max")
                         exit(0)
-                    self.amazon_website = config.get("amazon_website", "amazon.com")
                     for idx, item in enumerate(config["itemList"]):
                         asins = item["asins"]
                         min_price = item["min"] or 0.0
@@ -1819,16 +1804,6 @@ class Amazon(SeleniumStore):
                 "No config file found, see here on how to fix this: https://github.com/Hari-Nagarajan/fairgame/wiki/Usage#json-configuration"
             )
             exit(0)
-
-def get_timestamp_filename(name, extension):
-    """Utility method to create a filename with a timestamp appended to the root and before
-    the provided file extension"""
-    now = datetime.now()
-    date = now.strftime("%m-%d-%Y_%H_%M_%S")
-    if extension.startswith("."):
-        return name + "_" + date + extension
-    else:
-        return name + "_" + date + "." + extension
 
 
 def get_shipping_costs(tree, free_shipping_string):
@@ -1866,6 +1841,7 @@ def get_shipping_costs(tree, free_shipping_string):
     return get_alt_shipping_costs(tree, free_shipping_string)
 
 
+@deprecated
 def get_alt_shipping_costs(tree, free_shipping_string) -> Price:
     # Assume Free Shipping and change otherwise
 
@@ -1975,69 +1951,31 @@ def get_alt_shipping_costs(tree, free_shipping_string) -> Price:
 
 
 
+def save_asin_metadata(config):
+    config_path = get_config_dir()
 
-
-def wait_for_element_by_xpath(d, xpath, timeout=10):
     try:
-        WebDriverWait(d, timeout).until(
-            EC.presence_of_element_located((By.XPATH, xpath))
-        )
-    except sel_exceptions.TimeoutException:
-        log.error(f"failed to find {xpath}")
-        return False
-
-    return True
+        # Save the configuration data to a text file in JSON format
+        with open(config_path, 'w') as f:
+            json.dump(config, f)
+        log.info(f"ASIN Metadata saved successfully to {config_path}.")
+    except IOError as e:
+        print(f"Error saving ASIN Metadata to {config_path}: {e}")
 
 
-class AmazonItemCondition(Enum):
-    # See https://sellercentral.amazon.com/gp/help/external/200386310?language=en_US&ref=efph_200386310_cont_G1831
-    New = 10
-    Renewed = 20
-    Refurbished = 20
-    Rental = 30
-    Open_box = 40
-    UsedLikeNew = 40
-    UsedVeryGood = 50
-    UsedGood = 60
-    UsedAcceptable = 70
-    CollectibleLikeNew = 40
-    CollectibleVeryGood = 50
-    CollectibleGood = 60
-    CollectibleAcceptable = 70
-    Unknown = 1000
+def load_asin_metadata():
+    config_path = get_config_dir()
+    try:
+        # Load the configuration data from a text file in JSON format
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        log.info("Configuration loaded successfully.")
 
-    @classmethod
-    def from_str(cls, label):
-        # Straight lookup
-        try:
-            condition = AmazonItemCondition[label]
-            return condition
-        except KeyError:
-            # Key doesn't exist as a Member, so try cleaning up the string
-            cleaned_label = "".join(label.split())
-            cleaned_label = cleaned_label.replace("-", "")
-            try:
-                condition = AmazonItemCondition[cleaned_label]
-                return condition
-            except KeyError:
-                raise NotImplementedError
+    except FileNotFoundError:
+        log.warning("No configuration file found. Using default settings.")
+        config = {}
 
-
-def get_item_condition(form_action) -> AmazonItemCondition:
-    """Attempts to determine the Item Condition from the Add To Cart form action"""
-    if "_new_" in form_action:
-        # log.debug(f"Item condition is new")
-        return AmazonItemCondition.New
-    elif "_used_" in form_action:
-        # log.debug(f"Item condition is used")
-        return AmazonItemCondition.UsedGood
-    elif "_col_" in form_action:
-        # og.debug(f"Item condition is collectible")
-        return AmazonItemCondition.CollectibleGood
-    else:
-        # log.debug(f"Item condition is unknown: {form_action}")
-        return AmazonItemCondition.Unknown
-
-
-def join_xpaths(xpath_list, separator=" | "):
-    return separator.join(xpath_list)
+    except json.JSONDecodeError as e:
+        log.error(f"Error decoding JSON: {e}")
+        config = {}
+    return config
