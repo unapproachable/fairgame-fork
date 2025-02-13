@@ -32,6 +32,7 @@ import click
 from common.globalconfig import AMAZON_CREDENTIAL_FILE, GlobalConfig
 from notifications.notifications import NotificationHandler, TIME_FORMAT
 from stores.amazon2 import Amazon
+from stores.amazon_wishlist import AmazonWishlist
 from utils.logger import log
 from utils.version import is_latest, version, get_latest_version
 
@@ -409,6 +410,11 @@ def show_traceroutes(domain):
     for endpoint in endpoints:
         log.info(f" {trace_command}{endpoint}")
 
+@click.command()
+def amazon_wishlist():
+    amazon_wishlist = AmazonWishlist(global_config=global_config, notification_handler=notification_handler, debug=True)
+    amazon_wishlist.run()
+
 
 # Register Signal Handler for Interrupt
 signal(SIGINT, interrupt_handler)
@@ -418,6 +424,7 @@ main.add_command(test_notifications)
 main.add_command(show)
 main.add_command(find_endpoints)
 main.add_command(show_traceroutes)
+main.add_command(amazon_wishlist)
 
 # Global scope stuff here
 if is_latest():

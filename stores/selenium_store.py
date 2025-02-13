@@ -7,6 +7,7 @@ import psutil
 from selenium import webdriver
 from selenium.common import exceptions as sel_exceptions
 from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.chrome.webdriver import WebDriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.options import PageLoadStrategy
 from selenium.webdriver.support import expected_conditions as EC
@@ -31,7 +32,7 @@ class SeleniumStore(BaseStore):
 
 
     def __init__(self, *args, notification_handler: NotificationHandler, detailed: bool, no_screenshots: bool,
-                 slow_mode: bool, no_image: bool, single_shot: bool, disable_presence: bool, log_stock_check: bool,
+                 slow_mode: bool, no_image: bool, single_shot: bool = False, disable_presence: bool, log_stock_check: bool,
                  headless: bool = False, **kwargs):
         super().__init__(*args, notification_handler=notification_handler, detailed=detailed, single_shot=single_shot,
                          disable_presence=disable_presence, log_stock_check=log_stock_check, **kwargs)
@@ -40,7 +41,7 @@ class SeleniumStore(BaseStore):
         self.slow_mode: bool = slow_mode
         self.take_screenshots = not no_screenshots
 
-        self.driver = None
+        self.driver : WebDriver = None
         self.profile_path = self.global_config.get_browser_profile_path()
         self.webdriver_child_pids = []
         self.webdriver_initialized = False
@@ -49,7 +50,15 @@ class SeleniumStore(BaseStore):
 
         self.profile_path = self.global_config.get_browser_profile_path()
 
-    def create_driver(self, path_to_profile):
+    def create_drive(self, path_to_profile) -> bool:
+        driver = get_driver(self, path_to_profile)
+        if driver:
+            self.driver = driver
+            self.webdriver_child_pids = selenium_utils.get_webdriver_pids(self.driver)
+            return True
+        return False
+
+    def get_driver(self, path_to_profile):
 
         selenium_utils.cleanup_driver_crash_files(path_to_profile)
 
@@ -60,12 +69,10 @@ class SeleniumStore(BaseStore):
             self.configure_webdriver(path_to_profile, driver_options)
 
         try:
-            self.driver = webdriver.Chrome(
+            driver = webdriver.Chrome(
                 options=driver_options,
                 service=ChromeService(ChromeDriverManager().install())
             )
-            # self.wait = WebDriverWait(self.driver, 10)
-            self.webdriver_child_pids = selenium_utils.get_webdriver_pids(self.driver)
         except Exception as e:
             log.error(e)
             log.error(
@@ -75,9 +82,8 @@ class SeleniumStore(BaseStore):
                 "If that's not it, you probably have a previous Chrome window open. You should close it."
             )
 
-            return False
-
-        return True
+            return
+        return driver
 
     def configure_webdriver(self, path_to_profile, options):
         # See https://developer.chrome.com/docs/chromedriver/capabilities#recognized_capabilities

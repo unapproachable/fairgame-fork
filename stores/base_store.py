@@ -24,7 +24,6 @@ class BaseStore:
                  log_stock_check: bool,  # Could be rolled up in verbosity?
                  **kwargs
                  ):
-        super().__init__(*args, **kwargs)
         self.global_config = global_config
         self.detailed = detailed
         self.disable_presence: bool = disable_presence
